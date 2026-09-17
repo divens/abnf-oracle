@@ -1,13 +1,14 @@
 # Implementation plan: `abnf-oracle`
 
-Companion to `SCOPE.md` (revision 5). SCOPE.md is normative on *what* is built and why;
-this document is *how*, *in what order*, and *what still needs a decision*.
+Companion to `SCOPE.md` (revision 5.1). SCOPE.md is normative on *what* is built and why;
+this document is *how*, *in what order*, and *what still needs attention*.
 
 Status at time of writing: empty repository, no commits, `SCOPE.md` only.
 Toolchain present: rustc/cargo 1.97.1 (edition 2024 available, MSRV target = 1.97).
 
-Revision 5 settled D32–D37, which were this plan's open questions. §2 records what changed for
-the implementation; §2.1 is the one thing rev 5 does not yet answer.
+Revision 5 settled D32–D37; revision 5.1 settled D38, which was this plan's last open question.
+§2 records what that changed for the implementation. §2.1 lists three defects found in rev 5.1's
+own M3 acceptance criteria — two of the mandatory tests cannot be written as specified.
 
 ---
 
@@ -30,73 +31,93 @@ Every PR is reviewed against them.
    table and the property test both ways.
 5. **Analyses are per AST node, not per rule**, for `nullable`, `min_len`, `witness` (D9, D27).
    `reaches_prose` / `reaches_unrepresentable` are per rule (§6.5, §6.6).
-6. **Three error categories stay separate** (§6.6): structural (`CheckError`, fails `check`),
+6. **All coverage reasoning happens over the generatable graph**, never the raw AST (D10/D20):
+   no branch with infinite `min_len`, no `max == 0` body, and everything nested inside either is
+   invisible to unit enumeration, distance and reachability alike.
+7. **Three error categories stay separate** (§6.6): structural (`CheckError`, fails `check`),
    compatibility (per start rule, enforced by `Recognizer`/`Generator`), lint (advisory).
-7. **The parser accepts exactly the canonical self-grammar's language** (D35), modulo
+8. **The parser accepts exactly the canonical self-grammar's language** (D35), modulo
    line-ending normalization and the `u64` magnitude limit. M2 checks one direction, M3 the
    other. Any leniency added to the parser makes both tests vacuous.
-8. **Library target has zero required dependencies** (D13). `cli` is opt-in.
+9. **Library target has zero required dependencies** (D13). `cli` is opt-in.
    `#![forbid(unsafe_code)]`, `#![deny(missing_docs)]` on public items.
-9. **Limits are errors, never silent rejects** (D16, D29).
+10. **Limits are errors, never silent rejects** (D16, D29).
 
 ---
 
-## 2. What revision 5 changed for the implementation
+## 2. What revision 5.1 changed for the implementation
 
-All six questions are answered; five went the way this plan proposed, and **D32 went a better
-way than proposed**. Consequences, in descending order of blast radius:
+D38 adopts the proposed fix — witness mode engages only when no uncovered unit is reachable —
+and then goes further in a way that matters. The earlier proposal was *necessary but not
+sufficient*: suspending the depth budget keeps the walk alive, but "prefer any branch that
+reaches an uncovered unit, tie-break at random" can still wander forever between two branches
+that both reach the target. Rev 5.1 replaces reaching with a **well-founded measure** —
+`dist_to_uncovered`, ties by branch index — so the chase strictly descends and terminates. That
+is the same shape of fix D28 applied to witnesses, and the plan was one step short of it.
 
-**D32 — the two-layer split.** The earlier proposal (parse merges best-effort, stashes deferred
-issues) is dead, and good riddance. Rev 5 instead makes `Grammar` purely syntactic — an ordered
-list of `name = …` / `name =/ …` definitions with only *local* rewrites applied — and moves
-`=/` merging, name resolution and node-id assignment into `check()`. This changes:
+Consequences for the code:
 
-- `ast.rs`: `Grammar` holds `Vec<Definition>`, not a merged rule table; no `index`, no
-  `node_count`, no `issues` field. Node ids do not exist at this layer (§3.1).
-- `parse.rs`: loses assembly entirely (~80 lines lighter).
-- `check.rs`: gains the rule-table build and the lowering pass that assigns node ids
-  (~150 lines heavier). It is now clearly the biggest module.
-- Two `Display` impls, two `PartialEq` impls, two round-trip contracts, each tested
-  separately.
-- M1 grows from 8 PRs to 9 and is now the bulk of the project.
+- **§3.7 is redesigned.** `subtree_units: Vec<BitSet>` is gone. The generator now carries a
+  `dist_to_uncovered: Vec<u32>` recomputed by reverse BFS over the generatable graph, plus an
+  explicit generatable-graph construction (§4.4). Net effect on the module is roughly neutral in
+  size — a BFS replaces the bitset machinery — but it is a different algorithm, not a tweak.
+- **Coverage units are now start-rule-relative.** Rev 5's definition was "finite `min_len`, not
+  inside a `max == 0` body"; 5.1 adds "reachable from the start rule over the generatable
+  graph", which excludes units nested inside an unproductive branch even when their own
+  `min_len` is finite. Unit enumeration therefore needs a forward reachability pass per start
+  rule, cached.
+- **Selection rule 2 becomes `argmin dist`, ties by branch index** — deterministic, no RNG
+  consulted while chasing.
+- **Witness mode's trigger is `dist == ∞`**, not depth alone (D38).
+- M3 gains three acceptance tests (depth independence, chase determinism, nested units not
+  counted), which land in PR 3.2.
 
-**D35 — strictness is now a whole-file gate,** not just comments and prose: any non-ASCII byte
-anywhere in grammar text is `ParseError::NonAscii { span }`, *checked before tokenization*.
-That is a three-line pre-pass, and it simplifies every scanner function downstream because they
-can assume ASCII. It also adds a fixture (non-ASCII byte in a comment) and makes M3's
-self-generation test mandatory rather than a bonus.
+Nothing else in 5.1 moved: §§1–6.7, 7, 9–11 and D1–D37 are unchanged from rev 5, and the plan's
+treatment of them stands.
 
-**D33, D34, D36, D37** landed as recommended. D37 arrived with a full canonical-spelling table
-in §6.7 that is stricter than what was proposed — it also mandates dropping redundant groups
-and never emitting `0*a`. Both are local rewrites and belong in `parse` (§3.2).
+### 2.1 Three defects in rev 5.1's M3 acceptance criteria
 
-Also noted: the crate-name question (old R8) is settled in SCOPE's header — `abnf` is taken,
-`abnf-oracle` is the working name, rename freely. Still worth a 30-second crates.io check in
-PR 0.1 before the name lands in docs and fixtures, but it is no longer a risk.
+Found while working the new criteria into PR 3.2. All three are in SCOPE.md, not in the plan;
+each needs a one-line spec fix. Two of them block a mandatory test.
 
-### 2.1 The one question rev 5 leaves open
+**(a) The chase-determinism grammar cannot be checked.** M3 specifies:
 
-**The depth budget can defeat the coverage guarantee.** §6.8 says the walk switches to witness
-mode when the depth budget is exhausted, and separately guarantees that "while any coverage
-unit reachable from the start rule remains uncovered, each successful `generate()` call covers
-at least one new unit" — asserted exactly by M3, and stated as "a guarantee, not a
-probability".
+> Chase is deterministic: on `a = b / c`, `b = a`, `c = "x" / "y"` with `(c, "y")` the last
+> uncovered unit, …
 
-Those two can conflict. If `max_depth` trips witness mode while an uncovered unit is still
-reachable from the current node, the call returns successfully having covered nothing, and the
-bound fails on any grammar deeper than the budget. JSON is shallow enough that M3's specific
-assertion will pass either way, so the conflict will not show up as a test failure — it will
-show up later, on a user's deep grammar, as a guarantee that is not one.
+That grammar is left-recursive. The first-graph has `a → b` (from the branch `b`) and `b → a`
+(from `b`'s body), which is a cycle, so `check()` fails with `CheckError::LeftRecursion` — and
+since a `Generator` can only be built from a `CheckedGrammar` (D1), the test has nothing to run
+on. The same grammar appears in §6.8's rationale paragraph for rule 2, where it is only prose
+and so merely misleading.
 
-Proposed fix (as in §3.7): **in coverage mode, witness mode engages only when
-`subtree_units[node] & !covered` is empty** — the depth budget binds everywhere except along
-the path actively chasing an uncovered unit, which is finite because that unit is reachable and
-productive. `max_steps` and `max_output_len` remain the hard backstops, so this cannot
-introduce non-termination. Costs nothing in random mode.
+*Recommended fix:* `b = "z" a`. The non-nullable prefix kills the first-graph edge `b → a`, so
+the grammar checks, while the pathology being illustrated is preserved exactly — both branches
+of `a` still reach `(c, "y")`, and random tie-breaking still loops through `b` unboundedly
+(now emitting `"z"` each time, so it dies on `max_output_len` instead of hanging, which makes
+the test's failure mode clearer rather than weaker). Apply in both places.
 
-If accepted, it belongs in §6.8 and D10 as one sentence. If rejected, §6.8's guarantee needs a
-"subject to `max_depth`" qualifier and M3's assertion needs a stated depth precondition —
-either is fine, but the two texts as written cannot both hold.
+**(b) The nested-units test asserts the wrong number.** M3 specifies:
+
+> `start = "ok" / bad`, `bad = ("p" / "q") bad` reports exactly the two units of `start` and
+> none inside `bad`.
+
+By §6.8's own definition a unit requires finite `min_len`, and `start`'s second branch is
+`bad`, whose `min_len` is `∞`. So `start` contributes **one** unit, not two, and
+`uncovered(start)` is 1.
+
+*Recommended fix:* either assert 1, or — if a two-unit shape is what the test wants — make it
+`start = "ok" / "alt" / bad`, which gives exactly two units and still parks a productive-looking
+alternation inside the dead branch. The second reads better as a test of the distinction.
+
+**(c) `Generator` has no way to observe visits.** M3's chase test asserts "the call that covers
+it visits `a` at most `dist_to_uncovered(a)` times, asserted via `steps()` or a visit counter",
+but §7's `Generator` exposes no `steps()` — only `Recognizer` has one, and `GenOptions` has
+`max_steps` with no matching accessor.
+
+*Recommended fix:* add `pub fn steps(&self) -> u64` to `Generator`, mirroring `Recognizer::steps`.
+The counter has to exist anyway to enforce `max_steps` (D29), so this is one line and it keeps
+the acceptance test out of `#[cfg(test)]`-only internals.
 
 ---
 
@@ -157,9 +178,9 @@ Why an arena rather than putting an `id` field on `Element`: §6.7 defines node 
 "pre-order traversal of the merged, normalized rule table", which is exactly arena order, so
 the ids come out of the construction for free instead of needing a numbering pass and an
 unassigned sentinel at the parse layer. Analyses become dense `Vec<T>` indexed by the same
-number. The recognizer and generator walk by index rather than chasing `Box`es. The cost is a
-second element representation; see the `ElemView` note below for how to avoid duplicating the
-printer with it.
+number, and so does `dist_to_uncovered` (§4.4). The recognizer and generator walk by index
+rather than chasing `Box`es. The cost is a second element representation; see the `ElemView`
+note below for how to avoid duplicating the printer with it.
 
 Three details that are easy to get wrong:
 
@@ -198,7 +219,7 @@ Pipeline:
 3. **`rulelist` per RFC 5234 §4 + Erratum 2968.** One function per production — `rulelist`,
    `rule`, `defined_as`, `elements`, `alternation`, `concatenation`, `repetition`, `repeat`,
    `element`, `group`, `option`, `char_val`, `num_val`, `prose_val`, `c_wsp`, `c_nl`,
-   `comment` — so invariant 7 is auditable by reading the source against the fixture.
+   `comment` — so invariant 8 is auditable by reading the source against the fixture.
    *Task: take the corrected productions from the RFC 5234 errata page when transcribing the
    fixture; do not rely on memory for the erratum wording.*
 4. **Line continuation** falls out of `c-wsp = WSP / (c-nl WSP)`; do not pre-join lines.
@@ -243,17 +264,17 @@ Bootstrapping note: `core_rules` cannot call `check()` on itself through the nor
 without recursion (the checker consults the core environment). Lower the core table first, in
 its own pass with `Scope::Core`, then lower user rules against it.
 
-### 3.4 `check.rs` — now the biggest module
+### 3.4 `check.rs` — the biggest module
 
 Errors accumulate — return all of them, never just the first; grammar authors want the full
 list.
 
-1. **Rule-table build** (new in rev 5). Group definitions by ASCII-lowercased name. The first
-   `Base` defines the rule; each subsequent `Incremental` appends its body as further
-   alternatives, flattened into one top-level `Alt` so branch indices and canonical output
-   agree with §6.7. A second `Base` → `DuplicateDefinition`. An `Incremental` with no prior
-   `Base` → `IncrementalWithoutBase { name, shadows_core }`, with `shadows_core` set when the
-   name is a core rule (D34). Rule order is first-definition order.
+1. **Rule-table build.** Group definitions by ASCII-lowercased name. The first `Base` defines
+   the rule; each subsequent `Incremental` appends its body as further alternatives, flattened
+   into one top-level `Alt` so branch indices and canonical output agree with §6.7. A second
+   `Base` → `DuplicateDefinition`. An `Incremental` with no prior `Base` →
+   `IncrementalWithoutBase { name, shadows_core }`, with `shadows_core` set when the name is a
+   core rule (D34). Rule order is first-definition order.
 2. **Lowering.** Walk the merged table in pre-order, emitting arena nodes; `NodeId` is the
    emission index (D22/§6.7). Core rules are lowered after user rules.
 3. **Resolution.** Per `RuleRef`, user-first then core for user bodies, core-only for core
@@ -326,46 +347,61 @@ section in a comment).
 - `accepts(rule, input)` checks the compatibility flags *first* — §6.5 requires the error
   before any input is examined.
 
-### 3.7 `generate.rs`
+### 3.7 `generate.rs` — redesigned for D38
 
 ```rust
 pub struct Generator<'g> {
     grammar: &'g CheckedGrammar,
     rng: SplitMix64,
-    covered: BitSet,              // dense, indexed by coverage-unit index
-    unit_index: HashMap<(NodeId, u32), u32>,
-    subtree_units: Vec<BitSet>,   // per NodeId: units reachable from it (transitive)
+    units: Vec<Unit>,                    // (alt node, branch index), candidates
+    unit_of: HashMap<(NodeId, u32), u32>,
+    covered: BitSet,                     // indexed by unit index; global across start rules
+    reachable: HashMap<RuleId, Vec<u32>>,// units reachable from this start rule, cached
+    dist: Vec<u32>,                      // dist_to_uncovered per NodeId; u32::MAX = ∞
+    dist_dirty: bool,
+    steps: u64,                          // §2.1(c): expose via steps()
     opts: GenOptions,
 }
 ```
 
-Precomputation, once, at `Generator::new`: enumerate coverage units (D10/D25 — `Alt` branches
-and both `Optional` arms, finite `min_len` only, excluding anything under a `max == 0`
-repetition), then compute `subtree_units` by fixpoint over the rule graph. Rule references make
-it transitive, so iterate to stability rather than a single reverse-order pass.
+Precomputation at `Generator::new`: enumerate *candidate* units (`Alt` branches and both
+`Optional` arms with finite `min_len`), and build the generatable-graph adjacency (§4.4). Per
+start rule, on first use, compute the reachable unit set by forward traversal and cache it —
+that is what makes units start-rule-relative per D10 and what `uncovered(rule)` counts.
 
-Walk: `gen_node(node, depth, out, newly_covered)`.
+Walk: `gen_node(node, depth, out)`.
 
-- Alternation / `Optional`: selection per §6.8 — (1) an uncovered branch, (2) a branch whose
-  `subtree_units & !covered` is non-empty, (3) random. Never a branch with
-  `min_len == Infinite` (D20), in any mode.
+- Alternation / `Optional`, coverage mode, in order (§6.8):
+  1. a branch that is itself an uncovered unit;
+  2. else `argmin dist[branch]`, ties by lowest branch index — the chase. No RNG is consulted
+     here, which is what makes the chase deterministic and the M3 assertion meaningful;
+  3. else (every branch `∞`) random, and witness mode may engage if depth is exhausted.
+- Never a branch with `min_len == Infinite` (D20), in any mode — enforced by construction,
+  since such branches are not edges of the generatable graph.
 - Repetition: count uniform in `[min, min(max, min + spread)]`; in coverage mode, when the body
-  can reach an uncovered unit and `max >= 1`, count is at least `max(min, 1)` (D25).
-- Rule reference: recurse with `depth + 1`.
-- **Witness mode** on budget exhaustion: alternations take their `witness` branch, repetitions
-  take `min` (D28). Well founded by construction (§4.1).
+  can reach an uncovered unit (`dist[body] < ∞`) and `max >= 1`, count is at least
+  `max(min, 1)` (D25).
+- **Witness mode** engages when the depth budget is exhausted *and* `dist[node] == ∞` (D38).
+  In random mode the second condition is vacuous, so behaviour there is unchanged.
 - Limits: `max_output_len` (default `1 << 20`), `max_steps` (default `1 << 24`) → `GenError`
-  (D29).
+  (D29). These are the only backstops during a chase.
 
-Two implementation details SCOPE does not state, which the M3 acceptance criteria depend on:
+Three implementation details SCOPE does not state, which the M3 criteria depend on:
 
-- **Coverage commits on success only.** Units taken during a walk go into a scratch set and
-  merge into `covered` only when `generate()` returns `Ok`. Otherwise an `OutputLimit` failure
-  marks units covered that never appeared in any output, and M3's exact bound breaks.
-- **Witness mode must not preempt coverage steering** — see §2.1, the one open question.
-  Implement the proposed rule behind a clearly named predicate
-  (`fn should_use_witness(&self, node) -> bool`) so that flipping the decision later is a
-  one-function change rather than a rewrite.
+- **Coverage commits on success only, but rule 1 reads a live view.** Units taken during a walk
+  go into a scratch set; rule 1 tests `covered ∪ scratch` so one call does not keep re-covering
+  the same branch, and the scratch set merges into `covered` only when `generate()` returns
+  `Ok`. Without the commit gate, an `OutputLimit` failure would mark units covered that never
+  appeared in any output and M3's exact bound would break.
+- **Distance staleness is a performance concern, not a correctness one.** Covering a unit
+  mid-walk can only *raise* distances, so a stale `dist` still decreases strictly along the
+  chase — it may merely chase a unit that was just covered. Set `dist_dirty` when a unit is
+  covered and recompute lazily on next use; the BFS is O(nodes) over a grammar-sized graph, so
+  even recomputing on every newly covered unit is cheap. This matches §6.8's "lazy recompute at
+  each call boundary plus incremental updates".
+- **`uncovered(rule)` must not mutate.** It takes `&self` (§7) but needs the reachable-unit
+  cache; either populate the cache eagerly at `new` for every rule, or hold it in a `RefCell`.
+  Eager is simpler and grammar-sized — prefer it, and note that it makes `new` O(rules × nodes).
 
 ### 3.8 `rng.rs`
 
@@ -383,10 +419,9 @@ offending terminal or prose text so the CLI can print something actionable.
 `#[non_exhaustive]` on all five — the §14 v2 candidates will add variants, and that should not
 be a breaking change.
 
-`ParseError` variants needed by rev 5: `NonAscii`, `ExpectedCrlf`, `NumberTooLarge`, plus the
-ordinary syntactic ones. `CheckError` needs `DuplicateDefinition`, `IncrementalWithoutBase
-{ name, shadows_core }`, `UndefinedRule`, `InvalidRepeatRange`, `InvalidNumericRange`,
-`LeftRecursion`.
+`ParseError` needs `NonAscii`, `ExpectedCrlf`, `NumberTooLarge`, plus the ordinary syntactic
+ones. `CheckError` needs `DuplicateDefinition`, `IncrementalWithoutBase { name, shadows_core }`,
+`UndefinedRule`, `InvalidRepeatRange`, `InvalidNumericRange`, `LeftRecursion`.
 
 ---
 
@@ -456,7 +491,38 @@ Random tiny grammars (proptest): ≤ 4 rules, nesting ≤ 3, alphabet `{a, b}` p
 bounds ≤ 3, no prose. Filter to grammars that pass `check()` — which discards the
 left-recursive ones the enumerator would loop on anyway.
 
-### 4.4 Self-generation (M3, now mandatory per D35)
+### 4.4 The generatable graph and `dist_to_uncovered` (new in 5.1)
+
+Everything coverage-related runs on this graph, so build it once, explicitly, rather than
+re-deriving the exclusions at each use site.
+
+```
+nodes:  every arena node (user rules and core rules)
+edges:  Alt a       -> branch b        for each branch with finite min_len   (D20)
+        Optional o  -> body            (the ε arm is a unit, not an edge)
+        Concat c    -> each item
+        Repeat r    -> body            unless max == 0                       (D25/D36)
+        RuleRef n   -> root node of the resolved rule body
+        terminals   -> none
+```
+
+Two derived quantities:
+
+- **Reachable units, per start rule.** Forward traversal from the start rule's body root; a
+  candidate unit `(a, i)` counts iff `a` is reached. This is what excludes `("p" / "q")` inside
+  an unproductive `bad` — `bad` is not an edge of the graph, so nothing under it is reached.
+  `uncovered(rule)` = reachable units minus covered.
+- **`dist_to_uncovered`.** Multi-source reverse BFS. Seeds are the `Alt`/`Optional` nodes having
+  at least one uncovered unit branch, at distance 0; every other node gets `1 + min` over its
+  outgoing edges; unreached nodes are `∞`. One pass, O(nodes + edges).
+
+The chase then picks `argmin dist[branch]` with ties by index, and `dist` strictly decreases
+along it — the branch chosen from a node at distance *d* has distance *d − 1* or less — so it
+reaches a seed within *d* steps and rule 1 fires there. That is the well-foundedness argument
+D38 relies on; it is worth an assertion in debug builds (`dist[chosen] < dist[current]`), since
+a bug here degrades into a hang bounded only by `max_steps`.
+
+### 4.5 Self-generation (M3, mandatory per D35)
 
 500 strings generated from the canonical self-grammar's `rulelist` in coverage mode, each
 required to parse. Three things the test must get right:
@@ -501,7 +567,7 @@ Nine PRs; this is the bulk of the project.
 | **1.2** | Local rewrites (§3.2 step 7); `Display` + `PartialEq` for the **syntactic** layer | `Grammar::parse(g.to_string()) == g`; `*1a` ≡ `[a]`; canonical spelling unit-tested against the §6.7 table row by row |
 | **1.3** | `core_rules.rs` + fixture transcription: core rules, 3 self-definition variants, RFC 8259, 3986, 5322 §3, 3339, 9110 subset; header comment per file naming RFC/section/errata; `tests/parse_grammars.rs`; the ASCII-cleanliness scan | every fixture parses; the scan passes |
 | **1.4** | `check.rs` steps 1–3: rule-table build, lowering + node ids, hygienic resolution; `Display` + `PartialEq` for `CheckedGrammar` | `Grammar::parse(cg.to_string()).check() == cg`; duplicate / orphan `=/` / `shadows_core` fixtures fail with the right variant; two textually different grammars with one canonical form get identical node ids |
-| **1.5** | `check.rs` steps 4–5: range validation, representability | `5*2"a"` and `%x5A-41` fixtures fail; surrogate-spanning range is representable, `%xD800-DFFF` is not |
+| **1.5** | `check.rs` steps 4–5: range validation, representability | `5*2"a"` and `%x5A-41` fixtures fail; a surrogate-spanning range is representable, `%xD800-DFFF` is not |
 | **1.6** | `check.rs` steps 6–7: `nullable`, `min_len`, `witness` (§4.1) | unit tests incl. the saturating case (three nested `4294967295` repeats → `Finite(u64::MAX)`), the `a = b / "x"` tie, prose non-nullable |
 | **1.7** | `check.rs` steps 8–9: first-graph, left recursion, per-rule reachability | direct and indirect left-recursion fixtures fail; the prose fixture does not; a `*0(…)` body contributes no edges |
 | **1.8** | `lint.rs` + `lint_from` | expected warnings on hand-written cases; the RFC 9110 fixture yields `ShadowsCoreRule` and no errors |
@@ -534,10 +600,13 @@ JSONTestSuite is MIT-licensed: vendor `test_parsing/` only, with its `LICENSE` a
 
 | PR | Contents | Done when |
 |---|---|---|
-| **3.1** | `generate.rs`: walk, terminals, ranges, case variation, `preserve_case`, depth budget, witness mode, limits | `generate_roundtrip.rs`: every fixture × 200 seeds accepted by the recognizer, zero failures |
-| **3.2** | Coverage mode: unit enumeration, `subtree_units`, selection rule, coverage-aware repetition counts, commit-on-success, the §2.1 witness predicate | the exact bound holds on RFC 8259 and on a hand-written grammar with an unproductive alternative; `*("a" / "b")` covers both in ≤ 2 calls; a `*0(…)` body reports zero units |
-| **3.3** | Self-generation test (§4.4, D35) | 500 generated `rulelist` strings all parse |
+| **3.1** | `generate.rs`: walk, terminals, ranges, case variation, `preserve_case`, depth budget, witness mode, limits, `steps()` (§2.1c) | `generate_roundtrip.rs`: every fixture × 200 seeds accepted by the recognizer, zero failures |
+| **3.2** | Generatable graph, unit enumeration, `dist_to_uncovered`, the chase, coverage-aware repetition counts, commit-on-success (§3.7, §4.4) | the exact bound holds on RFC 8259 and on a grammar with an unproductive alternative; depth-independence case (5-deep chain at `max_depth = 2`); chase determinism (fixture per §2.1a); nested units not counted (§2.1b); `*("a" / "b")` covers both in ≤ 2 calls; a `*0(…)` body reports zero units |
+| **3.3** | Self-generation test (§4.5, D35) | 500 generated `rulelist` strings all parse |
 | **3.4** | Determinism and resource-bound tests; `uncovered()`; CLI `gen` | 100-call identical sequences; `1000000000*"a"` → `OutputLimit`; the `max_depth = 0` witness case; random mode terminates on 1000 seeds |
+
+PR 3.2 is the one that needs §2.1(a) and §2.1(b) settled before its tests can be written. Both
+are one-line spec edits; neither blocks 3.1.
 
 ### M4 — Differential (non-blocking during implementation, required before 1.0 — D24)
 
@@ -556,48 +625,48 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 | # | Risk | Mitigation |
 |---|---|---|
 | R1 | **Stack overflow in `recognize` on deeply nested input.** JSONTestSuite ships `n_structures_100000_opening_arrays.json` and friends; recursion depth there is ~input length. | Run corpus tests on a thread with an explicit 64 MB stack (`std::thread::Builder::stack_size`). If it still blows, classify those specific cases in `NOTES.md` as depth-limited and document the limit. Decide in PR 2.4, not later. |
-| R2 | **Coverage guarantee vs the depth budget** (§2.1) — the one open spec question. | Implement behind `should_use_witness`, get the §2.1 decision before M3.2 merges, and add a deliberately deep chain grammar to the coverage test so the conflict is visible rather than latent. |
+| R2 | **Two of M3's mandatory acceptance grammars are unusable as written** (§2.1a, §2.1b): one fails `check()` with `LeftRecursion`, the other asserts a unit count that contradicts §6.8. | Settle both one-line spec edits before PR 3.2. Until then the tests cannot be written, and writing them from the text as it stands produces a red build that looks like an implementation bug. |
 | R3 | Witness cycles from a round-robin `min_len` fixpoint. | Knuth worklist (§4.1), plus a debug assertion that following witnesses from any productive node terminates within `nodes.len()` steps. |
 | R4 | Fixture transcription errors across seven RFC grammars, by hand. | Header comment naming RFC + section + errata; a test asserting each fixture checks clean; cross-check against `abnfgen` / go-abnf in M4. Transcribe from RFC text, never from memory or third-party copies. |
 | R5 | Git line-ending mangling on Windows silently changing corpus bytes. | `.gitattributes` in PR 0.1, plus a test reading one known corpus file and asserting its exact byte length. |
 | R6 | Errata 2968 / 3076 wording taken from memory rather than the errata page. | PR 1.3 task: fetch both errata and paste the corrected productions into the fixture header. |
-| R7 | **Line-budget pressure** (~3,500 lines, §15). The two-layer split adds a representation, a printer view and a lowering pass; the budget below now totals 3,330 with less slack than rev 4 implied. | `ElemView` instead of two printers (§3.1); check at each milestone with `tokei`. An overrun means something from §3 or §14 crept in — cut it, do not raise the budget. |
-| R8 | The ASCII-cleanliness scan and the deliberately non-ASCII invalid fixture contradict each other. | Scope the scan to exclude `tests/grammars/invalid/parse/` (PR 1.3 / 1.1). Small, but it will fail CI on the day the fixture lands if nobody planned for it. |
+| R7 | **Line-budget pressure** (~3,500 lines, §15). The two-layer split added a representation and a lowering pass; D38 added the generatable graph and the BFS. The budget below totals 3,430 — about 70 lines of slack. | `ElemView` instead of two printers (§3.1); check at each milestone with `tokei`. If it overruns, the honest first cut is terser `Display` impls in `error.rs`, not a required behaviour. |
+| R8 | The ASCII-cleanliness scan and the deliberately non-ASCII invalid fixture contradict each other. | Scope the scan to exclude `tests/grammars/invalid/parse/` (PR 1.1 / 1.3). Small, but it will fail CI on the day the fixture lands if nobody planned for it. |
 | R9 | Memo clone cost making the JSON corpus slow enough to annoy. | Accept until M4; run corpus tests in `--release`; only then consider borrowed sets. |
+| R10 | A bug in the chase degrades into a walk bounded only by `max_steps` — slow and hard to diagnose. | Debug assertion `dist[chosen] < dist[current]` on every chase step (§4.4), so the invariant fails loudly in tests rather than quietly in the field. |
 
 ---
 
 ## 7. Line budget (§15: under ~3,500 lines of library code)
 
-Adjusted for the rev 5 two-layer split: `ast` and `check` grow, `parse` shrinks.
-
-| Module | Budget | Δ vs rev 4 plan |
+| Module | Budget | Δ vs rev 5 plan |
 |---|---|---|
-| `ast.rs` | 300 | +50 (second layer, `ElemView`, span newtype) |
-| `parse.rs` | 550 | −50 (no assembly) |
+| `ast.rs` | 300 | — |
+| `parse.rs` | 550 | — |
 | `core_rules.rs` | 120 | — |
-| `check.rs` | 850 | +150 (rule-table build, lowering, ids) |
+| `check.rs` | 850 | — |
 | `lint.rs` | 200 | — |
 | `recognize.rs` | 350 | — |
-| `generate.rs` | 550 | — |
+| `generate.rs` | 600 | +50 (generatable graph, BFS, per-start-rule cache) |
 | `rng.rs` | 60 | — |
 | `error.rs` | 300 | — |
 | `lib.rs` | 100 | — |
-| **Total** | **3,380** | **+150** |
+| **Total** | **3,430** | **+50** |
 
-CLI (~300 lines) and tests are excluded from the budget per §15. 120 lines of headroom is not
-much; `ElemView` is what keeps it positive.
+CLI (~300 lines) and tests are excluded from the budget per §15. Roughly 70 lines of headroom;
+`ElemView` is what keeps it positive.
 
 ---
 
 ## 8. Suggested order of work
 
-1. Decide §2.1 (coverage vs depth budget). It does not block M0–M2, but M3.2 needs it, and it
-   is cheaper to settle while the generator is still unwritten.
+1. Settle §2.1 — three one-line spec edits. (a) and (b) block PR 3.2's tests; (c) adds
+   `Generator::steps()` to §7. None block M0–M2, but they are cheapest to fix now, while the
+   affected code is unwritten.
 2. M0 in one sitting — mechanical, and it unblocks everything.
 3. M1.1–1.3 (parse + fixtures) before M1.4–1.8 (check). Having real fixtures in the tree makes
    every subsequent analysis testable against grammars people actually wrote.
-4. M1.4 (rule-table build + lowering + ids) is the new structural centre of the crate — both
+4. M1.4 (rule-table build + lowering + ids) is the structural centre of the crate — both
    round-trip contracts and every downstream analysis hang off it. Get its `Display` and
    `PartialEq` tests green before building anything on top.
 5. M1.6 (`min_len` / `witness`) is the most subtle PR. Write §4.1's algorithm with its own unit
@@ -605,4 +674,5 @@ much; `ElemView` is what keeps it positive.
 6. M2.2 (repetition) is the second most subtle. It has a mandatory test table — write the table
    first, then the code.
 7. M3 last, and only once the recognizer is trusted: every generator acceptance criterion is
-   stated in terms of the recognizer.
+   stated in terms of the recognizer. Within M3, 3.1 before 3.2 — the chase is much easier to
+   debug when plain generation is already known good.

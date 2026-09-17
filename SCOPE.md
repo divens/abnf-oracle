@@ -1,10 +1,10 @@
-# Scoping document: `abnf-oracle` (revision 5)
+# Scoping document: `abnf-oracle` (revision 5.1)
 
 A small, correct, dependency-light Rust crate that parses ABNF grammars (RFC 5234, RFC 7405), recognizes whether an input matches a rule, and generates random inputs that match a rule. Built to be a **testing oracle**, not a production parser.
 
 Working crate name: `abnf-oracle` (rename freely; `abnf` on crates.io is taken by an unmaintained crate with a different scope).
 
-Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
+Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
 
 ---
 
@@ -295,19 +295,25 @@ A recursive walk over the AST with a depth budget. Every choice point has a stab
 - Terminal: emit it. Ranges pick uniformly among representable scalars. Case-insensitive strings vary case randomly unless `preserve_case` is set.
 - Alternation (including `[a]` as `a / empty`): choose a branch per the selection rule below, **never a branch whose `min_len` is `∞`**. This ban is absolute and applies in every mode, not only under an exhausted depth budget: once inside an unproductive branch (`bad = "x" bad`) there may be no alternation left to steer by, and the walk would never end.
 - Repetition `min..max`: choose a count uniformly in `[min, min(max, min + spread)]`, `spread` default 3 — except in coverage mode, where if the body can reach an uncovered coverage unit and `max >= 1`, the count is at least `max(min, 1)`. A repetition with `max == 0` makes its body unreachable; units inside it are not coverage units.
-- Rule reference: recurse. When the depth budget is exhausted, the walk switches to **witness mode**: every subsequent alternation takes its `witness` branch and every repetition takes count `min` (§6.4). Because witnesses form a well-founded derivation, this terminates regardless of `min_len` ties or saturation. Choosing "the branch with the smallest `min_len`" is *not* an acceptable substitute.
+- Rule reference: recurse. When the depth budget is exhausted, the walk switches to **witness mode**: every subsequent alternation takes its `witness` branch and every repetition takes count `min` (§6.4). Because witnesses form a well-founded derivation, this terminates regardless of `min_len` ties or saturation. Choosing "the branch with the smallest `min_len`" is *not* an acceptable substitute. In coverage mode the depth budget is **suspended along a chase** (below): witness mode engages only when no uncovered unit is reachable from the current node.
 - Resource bound: `GenOptions::max_output_len` (default `1 << 20` scalars) and `GenOptions::max_steps` (default `1 << 24` node visits). Exceeding either returns `GenError::OutputLimit` / `GenError::StepLimit`. Mandatory work is not bounded by depth — `start = 1000000000*"a"` is productive and has no shorter expansion — so termination alone does not make generation practical; the bound does.
 - Prose value or unrepresentable terminal: cannot be reached, since the start rule was rejected at `generate()` entry if it could reach one.
 
-**Coverage unit**: `(alternation node id, branch index)` **where the branch's `min_len` is finite and the branch is not inside a repetition with `max == 0`**. Syntactically reachable branches with infinite `min_len` are not coverage units — they are reported by the `UnproductiveAlternative` lint instead (§6.4). Repetition counts are not coverage units; `[a]` contributes two units via its `a / empty` model, and since `*1a` canonicalizes to `[a]` (§6.7) the two spellings are indistinguishable here.
+**Generatable graph.** For everything coverage-related, reachability is computed over the *generatable* graph: the AST minus every alternation branch with infinite `min_len` and every `max == 0` repetition body, since the generator never enters either. This matters for nested units — in `start = "ok" / bad`, `bad = ("p" / "q") bad`, the branches `"p"` and `"q"` have finite `min_len` of their own but sit inside an unproductive branch, so they are not generatable and must not be counted.
+
+**Coverage unit**: `(alternation node id, branch index)` **where the branch's `min_len` is finite and the branch is reachable from the start rule over the generatable graph**. Syntactically reachable branches with infinite `min_len` are not coverage units — they are reported by the `UnproductiveAlternative` lint instead (§6.4). Repetition counts are not coverage units; `[a]` contributes two units via its `a / empty` model, and since `*1a` canonicalizes to `[a]` (§6.7) the two spellings are indistinguishable here.
+
+**Distance to uncovered.** `dist_to_uncovered(node)` is the number of edges, over the generatable graph, from `node` to the nearest uncovered coverage unit; `∞` if none is reachable. Computed by fixpoint from the current coverage set and recomputed whenever coverage changes (coverage only grows within a `generate()` call, so a lazy recompute at each call boundary plus incremental updates when a unit is newly covered is sufficient).
 
 **Selection rule in coverage mode** (deterministic-first):
 
 1. Among the branches of the current alternation, prefer any branch that is itself uncovered.
-2. Otherwise, prefer any branch whose subtree can reach an uncovered coverage unit (precomputed reachability, updated as coverage grows).
-3. Otherwise, choose randomly.
+2. Otherwise, prefer the branch with the smallest `dist_to_uncovered`, ties broken by branch index. This is a **chase**: distance strictly decreases along it, so it ends within `dist` steps, deterministically. The depth budget does not apply while chasing; `max_steps` and `max_output_len` remain the hard backstops.
+3. Otherwise (`dist_to_uncovered` is `∞` for every branch), choose randomly, and witness mode may engage as usual when the depth budget is exhausted.
 
-Consequence, which M3 asserts: while any coverage unit reachable from the start rule remains uncovered, each successful `generate()` call covers at least one new unit. The coverage-aware repetition count above is what makes this hold through `*(...)`, where a zero count would otherwise cover nothing. Therefore, subject to configured resource limits, full coverage requires at most `N` successful calls, where `N` is the number of reachable (and by definition generatable) coverage units. This is a guarantee, not a probability.
+"Prefer any branch that reaches an uncovered unit, ties at random" is *not* an acceptable substitute for rule 2: with `a = b / c`, `b = a`, `c = "x" / "y"` and only `(c, "y")` uncovered, both branches of `a` reach it, and random tie-breaking can loop through `b` unboundedly. That is the same failure D28 fixed for witnesses, and the same cure — a well-founded measure — applies.
+
+Consequence, which M3 asserts: while any coverage unit reachable from the start rule remains uncovered, each successful `generate()` call covers at least one new unit. The coverage-aware repetition count above is what makes this hold through `*(...)`, where a zero count would otherwise cover nothing, and the chase is what makes it hold on grammars deeper than `max_depth`, where witness mode would otherwise cut the walk short of the unit. Therefore, subject to configured resource limits, full coverage requires at most `N` successful calls, where `N` is the number of reachable (and by definition generatable) coverage units. This is a guarantee, not a probability, and it does not depend on `max_depth`.
 
 **Determinism contract**: given the same canonical grammar, the same `GenOptions`, the same seed, and the same sequence of API calls on a fresh `Generator`, the sequence of generated strings is identical. This is guaranteed within a crate version. Cross-version stability is *not* promised: corpora are committed as files (§9), so the seed is not the artifact. The RNG is an inline SplitMix64 to avoid a dependency and to make cross-version stability likely in practice.
 
@@ -351,13 +357,13 @@ impl<'g, 'i> Recognizer<'g, 'i> {
 pub struct GenOptions { pub max_depth: usize, pub spread: usize, pub coverage: bool, pub preserve_case: bool,
                         pub max_output_len: Option<usize>, pub max_steps: Option<u64> }
 
-pub struct Generator<'g> { /* &CheckedGrammar, SplitMix64, coverage state, options */ }
+pub struct Generator<'g> { /* &CheckedGrammar, SplitMix64, coverage state, dist_to_uncovered, options */ }
 
 impl<'g> Generator<'g> {
     pub fn new(grammar: &'g CheckedGrammar, seed: u64) -> Self;
     pub fn with_options(self, opts: GenOptions) -> Self;
     pub fn generate(&mut self, rule: &str) -> Result<String, GenError>;
-    pub fn uncovered(&self, rule: &str) -> usize;     // reachable coverage units not yet covered
+    pub fn uncovered(&self, rule: &str) -> usize;     // coverage units reachable over the generatable graph, not yet covered
 }
 
 pub enum MatchError { ProseValueReachable {..}, UnrepresentableTerminal {..}, UnknownRule(String), LeftRecursionDetected {..}, StepLimit }
@@ -394,6 +400,9 @@ Each milestone is a PR-sized unit. Do not start the next before the current one'
 **M3 — Generator.**
 - `generate_roundtrip.rs`: for each valid fixture and 200 seeds, `generate(start)` is accepted by the recognizer. Zero failures.
 - Coverage bound: for the JSON grammar, with `coverage = true`, `uncovered(start)` reaches zero within `N` calls, where `N` is the initial `uncovered(start)`. Asserted exactly, not probabilistically. Repeated on a hand-written grammar containing an unproductive alternative: the bound still holds, and the dead branch is never emitted.
+- Coverage is independent of depth: a hand-written grammar whose only uncovered unit sits behind a chain of five rule references, generated with `max_depth = 2` and `coverage = true`, still reaches `uncovered(start) == 0` within `N` calls. JSON is too shallow to catch a regression here; this test exists because of that.
+- Chase is deterministic: on `a = b / c`, `b = a`, `c = "x" / "y"` with `(c, "y")` the last uncovered unit, the call that covers it visits `a` at most `dist_to_uncovered(a)` times, asserted via `steps()` or a visit counter; and the result is identical across two seeds.
+- Nested units inside an unproductive branch are not counted: `start = "ok" / bad`, `bad = ("p" / "q") bad` reports exactly the two units of `start` and none inside `bad`.
 - `NoFiniteExpansion` returned immediately for an unproductive start rule; `ProseValueReachable` for a prose-reaching one. Random mode (`coverage = false`) on `start = "ok" / bad`, `bad = "x" bad` terminates on every one of 1000 seeds.
 - Zero-count repetition: on `start = *("a" / "b")` in coverage mode, both branches are covered in at most two calls; a hand-written grammar with a `*0(...)` body reports zero units inside it.
 - Self-generation: 500 strings generated from the canonical self-grammar's `rulelist`, in coverage mode, all parse with `Grammar::parse`. Together with M2's self-recognition this checks §4.2's invariant in both directions.
@@ -454,10 +463,11 @@ Exit codes for `match`:
 8. Disabling core rules as a `ParseOptions` switch: **removed** for v1. It is semantic configuration, would have to participate in equality and `Display`, and no use case survives shadowing (§4.1). If it returns, it returns as part of the grammar model, not as a parse option.
 9. Tri-state "unknown" nullability for prose: **no**; the fixed non-nullable/`min_len = 1` assumption gives the same safety with less code (§6.4).
 10. Arbitrary-precision `min_len`: **no**; saturating `u64` plus witnesses (§6.4).
+11. Qualifying the coverage guarantee with "subject to `max_depth`" instead of suspending the depth budget during a chase: **no**. A guarantee that fails on any grammar deeper than a tuning knob is not one; the chase is bounded by `dist_to_uncovered` and backstopped by `max_steps`, so suspending the budget costs nothing (§6.8).
 
 ## 13. Decisions before M1 (normative)
 
-Each item traces to the review that motivated it (D1–D16 first review, D17–D24 second, D25–D31 third, D32–D37 implementation-planning questions). Implement these as written.
+Each item traces to the review that motivated it (D1–D16 first review, D17–D24 second, D25–D31 third, D32–D37 implementation-planning questions, D38 implementation follow-up). Implement these as written.
 
 - **D1** A `Recognizer` or `Generator` can only be constructed from a `CheckedGrammar`. `Grammar::check` consumes the `Grammar`. There is no unchecked path.
 - **D2** A `Recognizer` is bound to one input at construction. The memo table lives inside it and is never reused across inputs.
@@ -468,7 +478,7 @@ Each item traces to the review that motivated it (D1–D16 first review, D17–D
 - **D7** No ambiguity detection or derivation counting in v1. The former M2 ambiguity test is removed; both self-definition variants remain as parse fixtures only.
 - **D8** M1 acceptance covers parsing and checking only; self-recognition is M2 and operates on CRLF-normalized text.
 - **D9** `min_len` / productivity is computed in `check()` per AST node; unproductive rules and unproductive alternatives are lint warnings; `generate()` fails fast with `NoFiniteExpansion` on an unproductive start rule.
-- **D10** Coverage units are `(alternation node id, branch index)` restricted to branches with finite `min_len`; selection is deterministic-first per §6.8; M3 asserts the exact bound.
+- **D10** Coverage units are `(alternation node id, branch index)` with finite `min_len`, reachable from the start rule over the **generatable graph** (no branch with infinite `min_len`, no `max == 0` body on the path). Selection is deterministic-first per §6.8: an uncovered branch first, else the branch with the smallest `dist_to_uncovered` with ties by index, else random. The depth budget is suspended during a chase, so the M3 bound holds independently of `max_depth`.
 - **D11** Prose values are a per-start-rule compatibility limit; no three-valued matching. Resolver hook deferred to v1.1.
 - **D12** `Grammar` and `CheckedGrammar` represent two distinct layers of the user grammar (§6.7). `Grammar` preserves the ordered `=` / `=/` definitions after local canonicalization only; `CheckedGrammar` contains the semantic rule table after incremental definitions are merged and names are resolved. Implicit core rules are part of the resolution environment and are never serialized as user rules. Each layer has its own `Display`, `PartialEq`, and round-trip contract. Parse options are excluded from `PartialEq` at the `Grammar` layer, and node ids are excluded at the `CheckedGrammar` layer.
 - **D13** The `cli` feature is opt-in. The library target has zero required dependencies. Directory exit codes per §11.
@@ -478,7 +488,7 @@ Each item traces to the review that motivated it (D1–D16 first review, D17–D
 - **D17** Numeric literals and repetition bounds are `u64`; overflow is `ParseError::NumberTooLarge`. Goal 1 is narrowed accordingly.
 - **D18** `min > max` in a repetition and `lo > hi` in a numeric range are structural errors (`InvalidRepeatRange`, `InvalidNumericRange`).
 - **D19** Phase 1 of repetition exits early on an *exact* fixpoint (`f(cur) == cur`) or emptiness, so large bounds cost at most input-length iterations.
-- **D20** The generator never enters a branch with infinite `min_len`, in any mode. Coverage units exclude such branches. `UnproductiveAlternative` is a lint.
+- **D20** The generator never enters a branch with infinite `min_len`, in any mode. Coverage units exclude such branches and everything nested inside them. `UnproductiveAlternative` is a lint.
 - **D21** `PartialEq` ignores parse options; they are provenance. Round-trip holds for any options.
 - **D22** Node ids are internal, excluded from `PartialEq`, and assigned in `check()` by pre-order traversal of the merged rule table (superseded in detail by D32).
 - **D23** The self-recognition fixture is the canonical self-grammar: RFC 5234 §4 + Erratum 2968 + RFC 7405 §2.2. It must recognize every fixture, including those using `%s`/`%i`.
@@ -493,9 +503,10 @@ Each item traces to the review that motivated it (D1–D16 first review, D17–D
 - **D32** `Grammar` is syntactic (ordered definitions, local rewrites only); `CheckedGrammar` is semantic (merged, resolved, id-assigned). `=/` merging happens in `check()`, so duplicate definition and `=/`-without-base are `CheckError`s and a `Grammar` never carries hidden validity state. Each layer has its own `Display`, `PartialEq` and round-trip (§6.7).
 - **D33** Core-rule resolution is hygienic: references inside core bodies resolve within the core environment; user shadowing affects only user references.
 - **D34** `=/` on a core-rule name with no explicit base is `IncrementalWithoutBase { shadows_core: true }`, whose message suggests the `NAME = <core> / extra` workaround.
-- **D35** The parser is strict per RFC 5234 for comments and prose values: both are ASCII-only. Any non-ASCII byte anywhere in grammar text is ParseError::NonAscii, checked before tokenization; comments and prose are simply the only positions where a non-ASCII byte could otherwise have been mistaken for valid content. Subject only to the documented line-ending normalization (§4.2) and the `u64` numeric-magnitude restriction in §6.1 / D17, the hand-written parser accepts exactly the language of the canonical self-grammar (RFC 5234 §4 + Erratum 2968 + RFC 7405 §2.2). Fixtures are required to be ASCII-clean and are checked accordingly. M3 verifies the reverse direction by generating from the canonical self-grammar and requiring every generated grammar to parse successfully.
+- **D35** The parser is strict per RFC 5234 for comments and prose values: both are ASCII-only. Any non-ASCII byte anywhere in grammar text is `ParseError::NonAscii`, checked before tokenization; comments and prose are simply the only positions where a non-ASCII byte could otherwise have been mistaken for valid content. Subject only to the documented line-ending normalization (§4.2) and the `u64` numeric-magnitude restriction in §6.1 / D17, the hand-written parser accepts exactly the language of the canonical self-grammar (RFC 5234 §4 + Erratum 2968 + RFC 7405 §2.2). Fixtures are required to be ASCII-clean and are checked accordingly. M3 verifies the reverse direction by generating from the canonical self-grammar and requiring every generated grammar to parse successfully.
 - **D36** `max == 0` repetition bodies contribute no first-graph edges and are excluded from `reaches_prose` / `reaches_unrepresentable`.
 - **D37** Canonical spelling follows the table in §6.7: even-padded uppercase `%x`, bare case-insensitive strings, `%s` for case-sensitive, and the stated parenthesization rules.
+- **D38** The coverage guarantee is independent of `max_depth`. In coverage mode, witness mode engages only when `dist_to_uncovered` is `∞` at the current node; while it is finite the walk chases by strictly decreasing distance (ties by branch index), so the chase is bounded and deterministic. `max_steps` / `max_output_len` remain the hard backstops.
 
 ## 14. v2 candidates (explicitly not v1)
 
