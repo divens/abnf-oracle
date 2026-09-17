@@ -1,10 +1,10 @@
-# Scoping document: `abnf-oracle` (revision 5.1)
+# Scoping document: `abnf-oracle` (revision 5.2)
 
 A small, correct, dependency-light Rust crate that parses ABNF grammars (RFC 5234, RFC 7405), recognizes whether an input matches a rule, and generates random inputs that match a rule. Built to be a **testing oracle**, not a production parser.
 
 Working crate name: `abnf-oracle` (rename freely; `abnf` on crates.io is taken by an unmaintained crate with a different scope).
 
-Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
+Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
 
 ---
 
@@ -311,7 +311,7 @@ A recursive walk over the AST with a depth budget. Every choice point has a stab
 2. Otherwise, prefer the branch with the smallest `dist_to_uncovered`, ties broken by branch index. This is a **chase**: distance strictly decreases along it, so it ends within `dist` steps, deterministically. The depth budget does not apply while chasing; `max_steps` and `max_output_len` remain the hard backstops.
 3. Otherwise (`dist_to_uncovered` is `∞` for every branch), choose randomly, and witness mode may engage as usual when the depth budget is exhausted.
 
-"Prefer any branch that reaches an uncovered unit, ties at random" is *not* an acceptable substitute for rule 2: with `a = b / c`, `b = a`, `c = "x" / "y"` and only `(c, "y")` uncovered, both branches of `a` reach it, and random tie-breaking can loop through `b` unboundedly. That is the same failure D28 fixed for witnesses, and the same cure — a well-founded measure — applies.
+"Prefer any branch that reaches an uncovered unit, ties at random" is *not* an acceptable substitute for rule 2: with `a = b / c`, `b = "z" a`, `c = "x" / "y"` and only `(c, "y")` uncovered, both branches of `a` reach it, and random tie-breaking can loop through `b` unboundedly, emitting `"z"` each lap until `max_output_len` trips. (The `"z"` prefix is what keeps `b` off the first-graph; `b = a` would be left recursion and fail `check()`.) That is the same failure D28 fixed for witnesses, and the same cure — a well-founded measure — applies.
 
 Consequence, which M3 asserts: while any coverage unit reachable from the start rule remains uncovered, each successful `generate()` call covers at least one new unit. The coverage-aware repetition count above is what makes this hold through `*(...)`, where a zero count would otherwise cover nothing, and the chase is what makes it hold on grammars deeper than `max_depth`, where witness mode would otherwise cut the walk short of the unit. Therefore, subject to configured resource limits, full coverage requires at most `N` successful calls, where `N` is the number of reachable (and by definition generatable) coverage units. This is a guarantee, not a probability, and it does not depend on `max_depth`.
 
@@ -364,6 +364,7 @@ impl<'g> Generator<'g> {
     pub fn with_options(self, opts: GenOptions) -> Self;
     pub fn generate(&mut self, rule: &str) -> Result<String, GenError>;
     pub fn uncovered(&self, rule: &str) -> usize;     // coverage units reachable over the generatable graph, not yet covered
+    pub fn steps(&self) -> u64;                       // node visits so far; the counter max_steps limits (mirrors Recognizer::steps)
 }
 
 pub enum MatchError { ProseValueReachable {..}, UnrepresentableTerminal {..}, UnknownRule(String), LeftRecursionDetected {..}, StepLimit }
@@ -401,8 +402,8 @@ Each milestone is a PR-sized unit. Do not start the next before the current one'
 - `generate_roundtrip.rs`: for each valid fixture and 200 seeds, `generate(start)` is accepted by the recognizer. Zero failures.
 - Coverage bound: for the JSON grammar, with `coverage = true`, `uncovered(start)` reaches zero within `N` calls, where `N` is the initial `uncovered(start)`. Asserted exactly, not probabilistically. Repeated on a hand-written grammar containing an unproductive alternative: the bound still holds, and the dead branch is never emitted.
 - Coverage is independent of depth: a hand-written grammar whose only uncovered unit sits behind a chain of five rule references, generated with `max_depth = 2` and `coverage = true`, still reaches `uncovered(start) == 0` within `N` calls. JSON is too shallow to catch a regression here; this test exists because of that.
-- Chase is deterministic: on `a = b / c`, `b = a`, `c = "x" / "y"` with `(c, "y")` the last uncovered unit, the call that covers it visits `a` at most `dist_to_uncovered(a)` times, asserted via `steps()` or a visit counter; and the result is identical across two seeds.
-- Nested units inside an unproductive branch are not counted: `start = "ok" / bad`, `bad = ("p" / "q") bad` reports exactly the two units of `start` and none inside `bad`.
+- Chase is deterministic: on `a = b / c`, `b = "z" a`, `c = "x" / "y"` with `(c, "y")` the last uncovered unit, the call that covers it visits `a` at most `dist_to_uncovered(a)` times, asserted via `Generator::steps()`; the output contains no `z`; and the result is identical across two seeds. A naive tie-at-random implementation fails this test with `OutputLimit`, not a hang.
+- Nested units inside an unproductive branch are not counted: `start = "ok" / "alt" / bad`, `bad = ("p" / "q") bad` reports `uncovered(start) == 2` — the two productive branches of `start` — and none for the `bad` branch or the `"p" / "q"` alternation inside it, even though those two branches have finite `min_len` of their own. Coverage completes in at most two calls.
 - `NoFiniteExpansion` returned immediately for an unproductive start rule; `ProseValueReachable` for a prose-reaching one. Random mode (`coverage = false`) on `start = "ok" / bad`, `bad = "x" bad` terminates on every one of 1000 seeds.
 - Zero-count repetition: on `start = *("a" / "b")` in coverage mode, both branches are covered in at most two calls; a hand-written grammar with a `*0(...)` body reports zero units inside it.
 - Self-generation: 500 strings generated from the canonical self-grammar's `rulelist`, in coverage mode, all parse with `Grammar::parse`. Together with M2's self-recognition this checks §4.2's invariant in both directions.

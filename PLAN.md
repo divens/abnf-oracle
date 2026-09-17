@@ -1,14 +1,14 @@
 # Implementation plan: `abnf-oracle`
 
-Companion to `SCOPE.md` (revision 5.1). SCOPE.md is normative on *what* is built and why;
+Companion to `SCOPE.md` (revision 5.2). SCOPE.md is normative on *what* is built and why;
 this document is *how*, *in what order*, and *what still needs attention*.
 
 Status at time of writing: empty repository, no commits, `SCOPE.md` only.
 Toolchain present: rustc/cargo 1.97.1 (edition 2024 available, MSRV target = 1.97).
 
-Revision 5 settled D32–D37; revision 5.1 settled D38, which was this plan's last open question.
-§2 records what that changed for the implementation. §2.1 lists three defects found in rev 5.1's
-own M3 acceptance criteria — two of the mandatory tests cannot be written as specified.
+Revision 5 settled D32–D37; 5.1 settled D38; 5.2 corrected the three M3 acceptance criteria this
+plan flagged. Spec and plan now agree on every normative point: §2 records what 5.1 and 5.2
+changed for the code, and §2.1 is a single follow-up on one of the rewritten criteria.
 
 ---
 
@@ -45,11 +45,11 @@ Every PR is reviewed against them.
 
 ---
 
-## 2. What revision 5.1 changed for the implementation
+## 2. What revisions 5.1 and 5.2 changed for the implementation
 
-D38 adopts the proposed fix — witness mode engages only when no uncovered unit is reachable —
-and then goes further in a way that matters. The earlier proposal was *necessary but not
-sufficient*: suspending the depth budget keeps the walk alive, but "prefer any branch that
+**5.1 — D38.** It adopts the proposed fix — witness mode engages only when no uncovered unit is
+reachable — and then goes further in a way that matters. The earlier proposal was *necessary but
+not sufficient*: suspending the depth budget keeps the walk alive, but "prefer any branch that
 reaches an uncovered unit, tie-break at random" can still wander forever between two branches
 that both reach the target. Rev 5.1 replaces reaching with a **well-founded measure** —
 `dist_to_uncovered`, ties by branch index — so the chase strictly descends and terminates. That
@@ -72,52 +72,42 @@ Consequences for the code:
 - M3 gains three acceptance tests (depth independence, chase determinism, nested units not
   counted), which land in PR 3.2.
 
-Nothing else in 5.1 moved: §§1–6.7, 7, 9–11 and D1–D37 are unchanged from rev 5, and the plan's
-treatment of them stands.
+**5.2 — the three M3 corrections.** All landed as recommended: the chase grammar is now
+`a = b / c`, `b = "z" a`, `c = "x" / "y"` (in §6.8's rationale as well as in M3), the
+nested-units fixture is `start = "ok" / "alt" / bad` asserting `uncovered(start) == 2`, and
+`Generator::steps()` is in §7. Two of the rewrites are sharper than what was proposed, and the
+tests should honour the difference:
 
-### 2.1 Three defects in rev 5.1's M3 acceptance criteria
+- The chase criterion now also asserts **the output contains no `z`** — a direct check that the
+  chase never takes branch `b`, rather than an indirect one through step counts — and records
+  that a naive tie-at-random implementation fails it with `OutputLimit` rather than hanging, so
+  the failure is diagnosable from the test output alone.
+- The nested-units fixture grew a third branch, so the assertion is `== 2` on a grammar where two
+  units genuinely exist. That tests the exclusion rule rather than an off-by-one.
 
-Found while working the new criteria into PR 3.2. All three are in SCOPE.md, not in the plan;
-each needs a one-line spec fix. Two of them block a mandatory test.
+One consequence for PR 3.1: `Generator::steps()` counts *node visits*, like its `Recognizer`
+twin, not visits to a particular rule. The chase criterion's "visits `a` at most
+`dist_to_uncovered(a)` times" is therefore asserted as a bound on total node visits, which
+upper-bounds the per-rule count. No separate per-node counter is needed.
 
-**(a) The chase-determinism grammar cannot be checked.** M3 specifies:
+Nothing else moved: §§1–6.7, 9–11 and D1–D38 are unchanged, and the plan's treatment of them
+stands.
 
-> Chase is deterministic: on `a = b / c`, `b = a`, `c = "x" / "y"` with `(c, "y")` the last
-> uncovered unit, …
+### 2.1 One follow-up on the new chase criterion
 
-That grammar is left-recursive. The first-graph has `a → b` (from the branch `b`) and `b → a`
-(from `b`'s body), which is a cycle, so `check()` fails with `CheckError::LeftRecursion` — and
-since a `Generator` can only be built from a `CheckedGrammar` (D1), the test has nothing to run
-on. The same grammar appears in §6.8's rationale paragraph for rule 2, where it is only prose
-and so merely misleading.
+The rewritten chase test asserts that the covering call's "output contains no `z`" and that "the
+result is identical across two seeds". Both are assertions about exact output text — and by §6.8
+the generator "varies case randomly" on case-insensitive strings unless `preserve_case` is set.
+Every terminal in that fixture (`"z"`, `"x"`, `"y"`) is a bare quoted string, hence
+case-insensitive, so the covering call emits `y` or `Y` depending on the seed and the two-seed
+assertion fails against a *correct* implementation.
 
-*Recommended fix:* `b = "z" a`. The non-nullable prefix kills the first-graph edge `b → a`, so
-the grammar checks, while the pathology being illustrated is preserved exactly — both branches
-of `a` still reach `(c, "y")`, and random tie-breaking still loops through `b` unboundedly
-(now emitting `"z"` each time, so it dies on `max_output_len` instead of hanging, which makes
-the test's failure mode clearer rather than weaker). Apply in both places.
+*Recommended fix:* run that one test with `preserve_case = true`. It makes both assertions exact
+without weakening either, and it keeps the test about the chase rather than about case variation.
+Case-folding the comparison instead would rescue "contains no `z`" but not "identical across two
+seeds".
 
-**(b) The nested-units test asserts the wrong number.** M3 specifies:
-
-> `start = "ok" / bad`, `bad = ("p" / "q") bad` reports exactly the two units of `start` and
-> none inside `bad`.
-
-By §6.8's own definition a unit requires finite `min_len`, and `start`'s second branch is
-`bad`, whose `min_len` is `∞`. So `start` contributes **one** unit, not two, and
-`uncovered(start)` is 1.
-
-*Recommended fix:* either assert 1, or — if a two-unit shape is what the test wants — make it
-`start = "ok" / "alt" / bad`, which gives exactly two units and still parks a productive-looking
-alternation inside the dead branch. The second reads better as a test of the distinction.
-
-**(c) `Generator` has no way to observe visits.** M3's chase test asserts "the call that covers
-it visits `a` at most `dist_to_uncovered(a)` times, asserted via `steps()` or a visit counter",
-but §7's `Generator` exposes no `steps()` — only `Recognizer` has one, and `GenOptions` has
-`max_steps` with no matching accessor.
-
-*Recommended fix:* add `pub fn steps(&self) -> u64` to `Generator`, mirroring `Recognizer::steps`.
-The counter has to exist anyway to enforce `max_steps` (D29), so this is one line and it keeps
-the acceptance test out of `#[cfg(test)]`-only internals.
+The other two new criteria need nothing — neither asserts on output text.
 
 ---
 
@@ -359,7 +349,7 @@ pub struct Generator<'g> {
     reachable: HashMap<RuleId, Vec<u32>>,// units reachable from this start rule, cached
     dist: Vec<u32>,                      // dist_to_uncovered per NodeId; u32::MAX = ∞
     dist_dirty: bool,
-    steps: u64,                          // §2.1(c): expose via steps()
+    steps: u64,                          // node visits; exposed via steps() per §7
     opts: GenOptions,
 }
 ```
@@ -600,13 +590,13 @@ JSONTestSuite is MIT-licensed: vendor `test_parsing/` only, with its `LICENSE` a
 
 | PR | Contents | Done when |
 |---|---|---|
-| **3.1** | `generate.rs`: walk, terminals, ranges, case variation, `preserve_case`, depth budget, witness mode, limits, `steps()` (§2.1c) | `generate_roundtrip.rs`: every fixture × 200 seeds accepted by the recognizer, zero failures |
-| **3.2** | Generatable graph, unit enumeration, `dist_to_uncovered`, the chase, coverage-aware repetition counts, commit-on-success (§3.7, §4.4) | the exact bound holds on RFC 8259 and on a grammar with an unproductive alternative; depth-independence case (5-deep chain at `max_depth = 2`); chase determinism (fixture per §2.1a); nested units not counted (§2.1b); `*("a" / "b")` covers both in ≤ 2 calls; a `*0(…)` body reports zero units |
+| **3.1** | `generate.rs`: walk, terminals, ranges, case variation, `preserve_case`, depth budget, witness mode, limits, `steps()` (§7) | `generate_roundtrip.rs`: every fixture × 200 seeds accepted by the recognizer, zero failures |
+| **3.2** | Generatable graph, unit enumeration, `dist_to_uncovered`, the chase, coverage-aware repetition counts, commit-on-success (§3.7, §4.4) | the exact bound holds on RFC 8259 and on a grammar with an unproductive alternative; depth-independence case (5-deep chain at `max_depth = 2`); chase determinism on `a = b / c`, `b = "z" a`, `c = "x" / "y"` with `preserve_case` (§2.1); nested units not counted (`uncovered(start) == 2`); `*("a" / "b")` covers both in ≤ 2 calls; a `*0(…)` body reports zero units |
 | **3.3** | Self-generation test (§4.5, D35) | 500 generated `rulelist` strings all parse |
 | **3.4** | Determinism and resource-bound tests; `uncovered()`; CLI `gen` | 100-call identical sequences; `1000000000*"a"` → `OutputLimit`; the `max_depth = 0` witness case; random mode terminates on 1000 seeds |
 
-PR 3.2 is the one that needs §2.1(a) and §2.1(b) settled before its tests can be written. Both
-are one-line spec edits; neither blocks 3.1.
+Every M3 fixture is now runnable as specified; the only adjustment PR 3.2 makes on its own
+authority is setting `preserve_case` on the chase test (§2.1).
 
 ### M4 — Differential (non-blocking during implementation, required before 1.0 — D24)
 
@@ -625,7 +615,7 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 | # | Risk | Mitigation |
 |---|---|---|
 | R1 | **Stack overflow in `recognize` on deeply nested input.** JSONTestSuite ships `n_structures_100000_opening_arrays.json` and friends; recursion depth there is ~input length. | Run corpus tests on a thread with an explicit 64 MB stack (`std::thread::Builder::stack_size`). If it still blows, classify those specific cases in `NOTES.md` as depth-limited and document the limit. Decide in PR 2.4, not later. |
-| R2 | **Two of M3's mandatory acceptance grammars are unusable as written** (§2.1a, §2.1b): one fails `check()` with `LeftRecursion`, the other asserts a unit count that contradicts §6.8. | Settle both one-line spec edits before PR 3.2. Until then the tests cannot be written, and writing them from the text as it stands produces a red build that looks like an implementation bug. |
+| R2 | **Rule 2 implemented as "any branch that reaches an uncovered unit" rather than `argmin dist`.** It is the natural simplification, it passes the JSON coverage test, and it is wrong — D38's termination argument needs the strictly decreasing measure. | The chase test is the guard: rev 5.2 records that the naive version fails it with `OutputLimit`. Keep the debug assertion of R10 as the second line of defence, and do not relax the chase fixture to something shallower. |
 | R3 | Witness cycles from a round-robin `min_len` fixpoint. | Knuth worklist (§4.1), plus a debug assertion that following witnesses from any productive node terminates within `nodes.len()` steps. |
 | R4 | Fixture transcription errors across seven RFC grammars, by hand. | Header comment naming RFC + section + errata; a test asserting each fixture checks clean; cross-check against `abnfgen` / go-abnf in M4. Transcribe from RFC text, never from memory or third-party copies. |
 | R5 | Git line-ending mangling on Windows silently changing corpus bytes. | `.gitattributes` in PR 0.1, plus a test reading one known corpus file and asserting its exact byte length. |
@@ -660,19 +650,18 @@ CLI (~300 lines) and tests are excluded from the budget per §15. Roughly 70 lin
 
 ## 8. Suggested order of work
 
-1. Settle §2.1 — three one-line spec edits. (a) and (b) block PR 3.2's tests; (c) adds
-   `Generator::steps()` to §7. None block M0–M2, but they are cheapest to fix now, while the
-   affected code is unwritten.
-2. M0 in one sitting — mechanical, and it unblocks everything.
-3. M1.1–1.3 (parse + fixtures) before M1.4–1.8 (check). Having real fixtures in the tree makes
+1. **M0, in one sitting.** Nothing is blocked any more — every normative question is settled, and
+   the one open item (§2.1) is a `preserve_case` flag decided when PR 3.2 is written. M0 is
+   mechanical and it unblocks everything.
+2. M1.1–1.3 (parse + fixtures) before M1.4–1.8 (check). Having real fixtures in the tree makes
    every subsequent analysis testable against grammars people actually wrote.
-4. M1.4 (rule-table build + lowering + ids) is the structural centre of the crate — both
+3. M1.4 (rule-table build + lowering + ids) is the structural centre of the crate — both
    round-trip contracts and every downstream analysis hang off it. Get its `Display` and
    `PartialEq` tests green before building anything on top.
-5. M1.6 (`min_len` / `witness`) is the most subtle PR. Write §4.1's algorithm with its own unit
+4. M1.6 (`min_len` / `witness`) is the most subtle PR. Write §4.1's algorithm with its own unit
    tests before wiring it to anything.
-6. M2.2 (repetition) is the second most subtle. It has a mandatory test table — write the table
+5. M2.2 (repetition) is the second most subtle. It has a mandatory test table — write the table
    first, then the code.
-7. M3 last, and only once the recognizer is trusted: every generator acceptance criterion is
+6. M3 last, and only once the recognizer is trusted: every generator acceptance criterion is
    stated in terms of the recognizer. Within M3, 3.1 before 3.2 — the chase is much easier to
    debug when plain generation is already known good.
