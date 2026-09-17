@@ -1,10 +1,10 @@
-# Scoping document: `abnf-oracle` (revision 4)
+# Scoping document: `abnf-oracle` (revision 5)
 
 A small, correct, dependency-light Rust crate that parses ABNF grammars (RFC 5234, RFC 7405), recognizes whether an input matches a rule, and generates random inputs that match a rule. Built to be a **testing oracle**, not a production parser.
 
-Working crate name: `abnf-oracle`.
+Working crate name: `abnf-oracle` (rename freely; `abnf` on crates.io is taken by an unmaintained crate with a different scope).
 
-Revisions 2–4 incorporate three rounds of external review. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
+Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
 
 ---
 
@@ -56,8 +56,8 @@ Everything in RFC 5234 §2–§4 and Appendix B, plus RFC 7405.
 | Numeric value | `%x41`, `%d65`, `%b1000001` | Representability: §6.1 |
 | Numeric range | `%x41-5A` | Representability: §6.1; descending ranges are a structural error |
 | Numeric concatenation | `%x41.42.43` | Erratum 3076 |
-| Prose value | `<some description>` | Parsed; not matchable or generatable (§6.5) |
-| Comments | `; text` to end of line | |
+| Prose value | `<some description>` | Parsed; not matchable or generatable (§6.5). Content restricted to `%x20-3D / %x3F-7E` exactly as RFC 5234 |
+| Comments | `; text` to end of line | Content restricted to `WSP / VCHAR` (ASCII) exactly as RFC 5234; non-ASCII is a `ParseError` (§4.2) |
 | Line continuation | Continuation lines begin with whitespace | |
 | Core rules | `ALPHA`, `DIGIT`, `CRLF`, `WSP`, … | Appendix B, always implicit in v1 (not configurable); see §4.1 |
 
@@ -81,8 +81,15 @@ Line endings: grammar text is normalized (`CRLF`, `LF`, `CR` → `LF`) before pa
 | Several `foo =/ …` lines after one `foo =` | Valid; appended in order |
 | Grammar defines a core-rule name (`DIGIT = …`) | Valid; the explicit definition **shadows** the implicit core rule. Lint warning `ShadowsCoreRule` (RFC 3986 and RFC 9110 restate core rules verbatim, so this must not be an error) |
 | Grammar defines a core-rule name twice explicitly | Structural error, as for any duplicate |
+| `DIGIT =/ "x"` with no explicit `DIGIT =` | **Structural error** `IncrementalWithoutBase { name, shadows_core: true }`; its `Display` suggests `DIGIT = <core definition> / "x"`. Extending an implicit rule has no coherent meaning under hygienic resolution (below) |
 
-The internal model is therefore three things: the **user grammar** (explicit rules, with `=/` merged into their base rule), the **core-rule environment** (implicit, consulted only for names the user grammar does not define), and **parse options**. `Display` serializes the user grammar only (§6.7).
+**Hygienic core rules.** Rule references *inside core-rule bodies* always resolve within the core environment; user shadowing affects only references written in the user grammar. So `DIGIT = "x"` changes what a user reference to `DIGIT` means, but core `HEXDIG` (defined as `DIGIT / "A" / … / "F"`) still matches `7`. The leaky alternative would let a lint-warned convenience silently redefine `HEXDIG`, `LWSP` and everything downstream. Under hygiene, RFC 3986's and RFC 9110's verbatim restatements are exact no-ops, which is the intended outcome. User references resolve user-first, then core.
+
+The internal model is therefore two layers (§6.7): a **syntactic** `Grammar` — the ordered list of definitions exactly as written, each `name = …` or `name =/ …` — and a **semantic** `CheckedGrammar` — the merged rule table produced by `check()`, resolved against the fixed **core-rule environment**. Duplicate definitions and `=/` without base are detected while building the rule table, so they are `CheckError`s, not `ParseError`s, and a `Grammar` never carries hidden validity state. `Display` at either layer serializes the user grammar only.
+
+### 4.2 Parser strictness
+
+The hand-written parser accepts exactly the language of the canonical self-grammar (RFC 5234 §4 + Erratum 2968 + RFC 7405 §2.2), **modulo line-ending normalization**: the self-grammar demands CRLF, while this parser normalizes LF and CR to CRLF-equivalent before parsing unless `strict_crlf` is set. Apart from that one deliberate leniency there is none — comments and prose values are ASCII-only as the RFC specifies, and a non-ASCII byte anywhere in grammar text is `ParseError::NonAscii { span }`. This invariant is what makes M2's self-recognition test and M3's self-generation test meaningful in both directions; a lenient parser would make them vacuous. Consequence: every fixture under `tests/grammars/` must be ASCII-clean, enforced by a test that scans them. A `ParseOptions::lenient_comments` syntactic option may be added later if real grammars need UTF-8 comments; it would not affect the default path.
 
 ## 5. Architecture
 
@@ -93,9 +100,9 @@ abnf-oracle/
 ├── src/
 │   ├── lib.rs                 public API re-exports
 │   ├── ast.rs                 Grammar, Rule, Element, Repeat, StringLit, NumVal, node ids
-│   ├── parse.rs               grammar text → Grammar (hand-written recursive descent)
+│   ├── parse.rs               grammar text → Grammar (hand-written recursive descent; local rewrites only, no merging)
 │   ├── core_rules.rs          Appendix B rules as a Grammar constant
-│   ├── check.rs               structural check → CheckedGrammar; per-rule analyses
+│   ├── check.rs               rule-table build (=/ merge, duplicates, core resolution) → CheckedGrammar; analyses; node ids
 │   ├── lint.rs                warnings: unreferenced, unreachable, unproductive, shadowing
 │   ├── recognize.rs           set-of-positions recognizer, bound to one input
 │   ├── generate.rs            deterministic generator with coverage mode
@@ -225,7 +232,7 @@ Additionally, a property test compares the recognizer against a brute-force enum
 - **nullable(n)**: can `n` match the empty string?
 - **min_len(n)**: length of the shortest string `n` can match, as `MinLen::Finite(u64)` or `MinLen::Infinite`. Arithmetic on the finite variant **saturates** at `u64::MAX`: nested repetitions can produce a shortest expansion that overflows even though every literal fits (§6.1), and a saturated value is still *finite*, hence still productive. A node is **productive** iff `min_len` is finite.
 - **witness(n)**: for every alternation node with finite `min_len`, the branch that *first* attained the node's final `min_len` during fixpoint iteration; for every repetition, the count `min`. Witnesses form a well-founded derivation: each was fixed at an earlier iteration than the node that refers to it, so following witnesses from any productive node reaches terminals in finitely many steps. This is the generator's termination device (§6.8) — comparing `min_len` magnitudes is *not*, since ties (`a = b / "x"`, `b = a / "y"`, both `min_len = 1`) can cycle, and saturated values compare meaninglessly.
-- **first-graph**: edge `A → B` iff `B` can be the first thing matched by `A`, i.e. `B` occurs in `A`'s body preceded only by nullable elements.
+- **first-graph**: edge `A → B` iff `B` can be the first thing matched by `A`, i.e. `B` occurs in `A`'s body preceded only by nullable elements. The body of a repetition with `max == 0` can never match anything, so it contributes no edges; likewise it is excluded from `reaches_prose` and `reaches_unrepresentable`. (D18 guarantees `max == 0` implies `min == 0`; such a node is nullable with `min_len = Finite(0)`.) This is the analysis-side twin of the coverage rule in §6.8.
 
 **Prose values in analyses.** `<prose>` has no defined matching semantics, so its true nullability and length are unknown. For analysis purposes only, v1 assumes prose is **non-nullable with `min_len = 1`**. This is the safe assumption: it never creates a first-graph edge (so prose cannot cause a spurious global left-recursion failure), never makes a branch look unproductive (so no misleading `UnproductiveAlternative`), and the only rules whose analyses could be wrong under it are prose-reaching rules, which v1 refuses to recognize or generate from anyway (§6.5). Rules that do not reach prose have analyses independent of the assumption. Revisit when the resolver hook arrives.
 
@@ -257,15 +264,33 @@ Three categories, deliberately kept separate:
 
 ### 6.7 Canonical form and equality
 
-`Display` for `Grammar` and `CheckedGrammar` emits the **user grammar only**, in canonical form: one rule per line, `=/` merged into the base definition, single spaces, `%x` for all numeric values, `*1a` rewritten to `[a]` and `1*1a` to `a`, CRLF line endings. Implicit core rules are never printed. Comments are not preserved (semantic-only model). These rewrites happen on the AST during normalization, so coverage units (§6.8) and node ids are computed on the same shape `Display` prints.
+There are two layers, each with its own canonical `Display` and its own round-trip requirement.
 
-`PartialEq` compares user rules only (order-sensitive). It ignores **parse options** (they are syntactic provenance, not grammar semantics, and `Display` does not serialize them — which is exactly why `ParseOptions` must never hold semantic configuration such as a core-rule switch) and **node ids** (internal). Round-trip requirement: `Grammar::parse(g.to_string()) == g`, for a `g` parsed with any options.
+**`Grammar` (syntactic).** An ordered list of definitions as written, each `name = elements` or `name =/ elements`. `parse` applies only *local* rewrites that need no knowledge of other rules: `*1a → [a]`, `1*1a → a`, numeric spelling normalization. It does **not** merge `=/`, resolve names, or assign node ids. `Display` prints one definition per line in that order. `PartialEq` compares the definition list, ignoring parse options (syntactic provenance, never serialized — which is why `ParseOptions` must never hold semantic configuration). Round-trip: `Grammar::parse(g.to_string()) == g` for a `g` parsed with any options.
 
-**Node ids** are assigned deterministically by pre-order traversal of the *canonical* AST — after `=/` merging and normalization, in rule definition order — not during parsing. Two grammars with the same canonical form therefore have identical node ids, which is what makes the generator's determinism contract (§6.8) meaningful across equal grammars.
+**`CheckedGrammar` (semantic).** The merged rule table: every `=/` folded into its base rule in order, names resolved user-first then core (hygienically, §4.1), node ids assigned. `Display` prints one merged rule per line in first-definition order; implicit core rules are never printed. `PartialEq` compares merged rules, ignoring node ids. Round-trip: `Grammar::parse(cg.to_string()).check() == cg`.
+
+Comments are not preserved at either layer (semantic-only model).
+
+**Node ids** are assigned in `check()` by pre-order traversal of the merged, normalized rule table in first-definition order. Two grammars with the same merged canonical form therefore have identical node ids, which is what makes the generator's determinism contract (§6.8) meaningful across equal grammars, and coverage units (§6.8) are computed on the same shape `CheckedGrammar::Display` prints.
+
+**Canonical spelling** (both layers):
+
+| Element | Canonical form |
+|---|---|
+| Numeric value | `%x` with uppercase hex, zero-padded to an even digit count: `%x0D`, `%x41`, `%x0100`, `%x10FFFF` |
+| Numeric range | `%x41-5A` (each endpoint padded as above) |
+| Numeric concatenation | `%x41.42.43` |
+| Case-insensitive string | bare `"abc"`; `%i"abc"` is never emitted |
+| Case-sensitive string | `%s"abc"` |
+| Empty string | `""` |
+| Repetition | `*a`, `3a`, `2*5a`, `*3a`, `3*a`; never `0*a`, never `*1a` (that is `[a]`), never `1*1a` (that is `a`) |
+| Parenthesization | an alternation nested inside a concatenation or a repetition is parenthesized; a concatenation inside an alternation branch is not; `[x]` never takes outer parentheses; redundant groups are dropped |
+| Whitespace | single spaces between elements, ` = ` / ` =/ ` around the definition operator, no trailing whitespace, CRLF line endings |
 
 ### 6.8 Generator
 
-A recursive walk over the AST with a depth budget. Every choice point in the AST has a stable **node id** assigned from the canonical AST (§6.7).
+A recursive walk over the AST with a depth budget. Every choice point has a stable **node id** assigned on the merged rule table in `check()` (§6.7).
 
 - Terminal: emit it. Ranges pick uniformly among representable scalars. Case-insensitive strings vary case randomly unless `preserve_case` is set.
 - Alternation (including `[a]` as `a / empty`): choose a branch per the selection rule below, **never a branch whose `min_len` is `∞`**. This ban is absolute and applies in every mode, not only under an exhausted depth budget: once inside an unproductive branch (`bad = "x" bad`) there may be no alternation left to steer by, and the walk would never end.
@@ -289,17 +314,17 @@ Consequence, which M3 asserts: while any coverage unit reachable from the start 
 ## 7. Public API sketch
 
 ```rust
-pub struct Grammar { /* user rules with node ids; parse options */ }
+pub struct Grammar { /* ordered definitions as written (= and =/), locally rewritten; parse options */ }
 
 impl Grammar {
     pub fn parse(src: &str) -> Result<Grammar, ParseError>;               // core rules implicit
     pub fn parse_with(src: &str, opts: ParseOptions) -> Result<Grammar, ParseError>;
     pub fn parse_options(&self) -> &ParseOptions;                         // provenance; not part of PartialEq
-    pub fn check(self) -> Result<CheckedGrammar, Vec<CheckError>>;        // consumes; structural only
+    pub fn check(self) -> Result<CheckedGrammar, Vec<CheckError>>;        // consumes; merges =/, resolves names, assigns ids, runs analyses; structural errors only
 }
 
 /// A grammar that passed structural validation. The only route to a Recognizer or Generator.
-pub struct CheckedGrammar { /* Grammar + analyses: nullable, min_len (saturating) and witness per node; reaches_prose and reaches_unrepresentable per rule */ }
+pub struct CheckedGrammar { /* merged rule table with node ids + analyses: nullable, min_len (saturating) and witness per node; reaches_prose and reaches_unrepresentable per rule */ }
 
 pub enum MinLen { Finite(u64), Infinite }   // Finite saturates at u64::MAX
 
@@ -349,8 +374,9 @@ Each milestone is a PR-sized unit. Do not start the next before the current one'
 
 **M1 — Grammar parser and check.**
 - Parses every `.abnf` in `tests/grammars/`: RFC 5234 Appendix B core rules; the ABNF self-definition in three variants — RFC 5234 §4 as published, RFC 5234 §4 with Erratum 2968, and the **canonical self-grammar** (RFC 5234 §4 + Erratum 2968 + the RFC 7405 §2.2 `char-val` amendments), which is the one M2 uses; RFC 8259 JSON; RFC 3986 URI; RFC 5322 §3 address grammar; RFC 3339 date-time; RFC 9110 selected header field grammars (exercises core-rule shadowing and `obs-text`).
-- Every fixture passes `check()` except deliberately broken fixtures under `tests/grammars/invalid/` (undefined rule, duplicate, `=/` without base, direct and indirect left recursion, `min > max` repeat, descending numeric range), each of which must fail with the expected `CheckError` variant. A fixture with a 25-digit repeat count fails to *parse* with `NumberTooLarge`.
-- Round-trip: `Grammar::parse(g.to_string()) == g` for every valid fixture, including fixtures parsed with `strict_crlf = true` (equality ignores parse options and node ids). `*1a` and `[a]` parse to equal grammars.
+- Every fixture passes `check()` except deliberately broken fixtures under `tests/grammars/invalid/` (undefined rule, duplicate, `=/` without base, `=/` on an implicit core rule with `shadows_core: true`, direct and indirect left recursion, `min > max` repeat, descending numeric range), each of which must fail with the expected `CheckError` variant. A fixture with a 25-digit repeat count fails to *parse* with `NumberTooLarge`; a fixture with a non-ASCII byte in a comment fails to parse with `NonAscii`.
+- A test scans every file under `tests/grammars/` and fails on any non-ASCII byte (§4.2).
+- Round-trip at both layers: `Grammar::parse(g.to_string()) == g` and `Grammar::parse(cg.to_string()).check() == cg` for every valid fixture, including fixtures parsed with `strict_crlf = true`. `*1a` and `[a]` parse to equal grammars. Canonical spelling is unit-tested against the §6.7 table.
 - `lint()` and `lint_from()` produce the expected warnings on hand-written cases, including `UnproductiveRule` and `UnproductiveAlternative`; the RFC 9110 fixture yields `ShadowsCoreRule` warnings and no errors.
 - Analyses (nullable, `min_len` and `witness` per node; `reaches_prose` and `reaches_unrepresentable` per rule) are unit-tested on hand-written grammars, including: a `min_len` that saturates (three nested `4294967295` repetitions) and is still `Finite`; a prose-containing rule that does *not* trigger left recursion or `UnproductiveAlternative`; and the tie case `a = b / "x"`, `b = a / "y"`, whose witnesses point at the terminals.
 - Node ids: two textually different grammars with the same canonical form yield identical node ids.
@@ -363,12 +389,14 @@ Each milestone is a PR-sized unit. Do not start the next before the current one'
 - `self_definition.rs`: the recognizer, running the **canonical self-grammar** (RFC 5234 + Erratum 2968 + RFC 7405), accepts the CRLF-normalized text of every valid fixture in `tests/grammars/`, including fixtures that use `%s`/`%i` strings. The test normalizes line endings itself so results do not depend on Git checkout settings.
 - Compatibility limits: a fixture with a prose value yields `ProseValueReachable` from a start rule that reaches it, and `Ok` from one that does not.
 - Hand-written unit tests for every construct in §4, including `=/`, `%s` vs `%i`, nested optionals, and core-rule shadowing.
+- Hygiene: with `DIGIT = "x"` and a user rule referencing `HEXDIG`, `HEXDIG` still matches `7` and a user reference to `DIGIT` matches `x` and not `7`; exactly one `ShadowsCoreRule` warning, no errors.
 
 **M3 — Generator.**
 - `generate_roundtrip.rs`: for each valid fixture and 200 seeds, `generate(start)` is accepted by the recognizer. Zero failures.
 - Coverage bound: for the JSON grammar, with `coverage = true`, `uncovered(start)` reaches zero within `N` calls, where `N` is the initial `uncovered(start)`. Asserted exactly, not probabilistically. Repeated on a hand-written grammar containing an unproductive alternative: the bound still holds, and the dead branch is never emitted.
 - `NoFiniteExpansion` returned immediately for an unproductive start rule; `ProseValueReachable` for a prose-reaching one. Random mode (`coverage = false`) on `start = "ok" / bad`, `bad = "x" bad` terminates on every one of 1000 seeds.
 - Zero-count repetition: on `start = *("a" / "b")` in coverage mode, both branches are covered in at most two calls; a hand-written grammar with a `*0(...)` body reports zero units inside it.
+- Self-generation: 500 strings generated from the canonical self-grammar's `rulelist`, in coverage mode, all parse with `Grammar::parse`. Together with M2's self-recognition this checks §4.2's invariant in both directions.
 - Witness termination: with `max_depth = 0`, generation from `a` in `a = b / "x"`, `b = a / "y"` terminates and yields `x` or `y`.
 - Resource bound: `start = 1000000000*"a"` returns `OutputLimit` under default options rather than running.
 - Determinism: two fresh generators with the same seed and options produce identical sequences over 100 calls.
@@ -429,7 +457,7 @@ Exit codes for `match`:
 
 ## 13. Decisions before M1 (normative)
 
-Each item traces to the review that motivated it (D1–D16 first review, D17–D24 second, D25–D31 third). Implement these as written.
+Each item traces to the review that motivated it (D1–D16 first review, D17–D24 second, D25–D31 third, D32–D37 implementation-planning questions). Implement these as written.
 
 - **D1** A `Recognizer` or `Generator` can only be constructed from a `CheckedGrammar`. `Grammar::check` consumes the `Grammar`. There is no unchecked path.
 - **D2** A `Recognizer` is bound to one input at construction. The memo table lives inside it and is never reused across inputs.
@@ -442,7 +470,7 @@ Each item traces to the review that motivated it (D1–D16 first review, D17–D
 - **D9** `min_len` / productivity is computed in `check()` per AST node; unproductive rules and unproductive alternatives are lint warnings; `generate()` fails fast with `NoFiniteExpansion` on an unproductive start rule.
 - **D10** Coverage units are `(alternation node id, branch index)` restricted to branches with finite `min_len`; selection is deterministic-first per §6.8; M3 asserts the exact bound.
 - **D11** Prose values are a per-start-rule compatibility limit; no three-valued matching. Resolver hook deferred to v1.1.
-- **D12** `Display` and `PartialEq` cover the user grammar only; `=/` is merged; core rules are implicit environment; parse options and node ids are excluded from `PartialEq`.
+- **D12** `Grammar` and `CheckedGrammar` represent two distinct layers of the user grammar (§6.7). `Grammar` preserves the ordered `=` / `=/` definitions after local canonicalization only; `CheckedGrammar` contains the semantic rule table after incremental definitions are merged and names are resolved. Implicit core rules are part of the resolution environment and are never serialized as user rules. Each layer has its own `Display`, `PartialEq`, and round-trip contract. Parse options are excluded from `PartialEq` at the `Grammar` layer, and node ids are excluded at the `CheckedGrammar` layer.
 - **D13** The `cli` feature is opt-in. The library target has zero required dependencies. Directory exit codes per §11.
 - **D14** Invalid UTF-8 input is an error (exit 2), never a rejection.
 - **D15** Determinism is guaranteed for a fresh generator with the same seed, options and call sequence, within a crate version. RNG is inline SplitMix64.
@@ -452,7 +480,7 @@ Each item traces to the review that motivated it (D1–D16 first review, D17–D
 - **D19** Phase 1 of repetition exits early on an *exact* fixpoint (`f(cur) == cur`) or emptiness, so large bounds cost at most input-length iterations.
 - **D20** The generator never enters a branch with infinite `min_len`, in any mode. Coverage units exclude such branches. `UnproductiveAlternative` is a lint.
 - **D21** `PartialEq` ignores parse options; they are provenance. Round-trip holds for any options.
-- **D22** Node ids are internal, excluded from `PartialEq`, and assigned by pre-order traversal of the canonical AST after `=/` merging.
+- **D22** Node ids are internal, excluded from `PartialEq`, and assigned in `check()` by pre-order traversal of the merged rule table (superseded in detail by D32).
 - **D23** The self-recognition fixture is the canonical self-grammar: RFC 5234 §4 + Erratum 2968 + RFC 7405 §2.2. It must recognize every fixture, including those using `%s`/`%i`.
 - **D24** M4 is non-blocking during implementation and required before the 1.0 release. No complexity guarantee is claimed for the recognizer; `max_steps` is the resource bound.
 - **D25** In coverage mode, a repetition whose body can reach an uncovered unit and whose `max >= 1` uses a count of at least `max(min, 1)`. Units inside a `max == 0` repetition are not coverage units.
@@ -462,6 +490,12 @@ Each item traces to the review that motivated it (D1–D16 first review, D17–D
 - **D29** Generation has explicit resource bounds (`max_output_len`, `max_steps`) with corresponding `GenError` variants; defaults are finite.
 - **D30** `ParseOptions` holds syntactic options only. The core-rule environment is fixed in v1 and not configurable. `PartialEq` ignoring parse options is therefore exact.
 - **D31** Canonicalization rewrites `*1a` to `[a]` and `1*1a` to `a` on the AST before node ids and coverage units are computed. Performance tests assert step counts via `Recognizer::steps()`, not wall-clock time.
+- **D32** `Grammar` is syntactic (ordered definitions, local rewrites only); `CheckedGrammar` is semantic (merged, resolved, id-assigned). `=/` merging happens in `check()`, so duplicate definition and `=/`-without-base are `CheckError`s and a `Grammar` never carries hidden validity state. Each layer has its own `Display`, `PartialEq` and round-trip (§6.7).
+- **D33** Core-rule resolution is hygienic: references inside core bodies resolve within the core environment; user shadowing affects only user references.
+- **D34** `=/` on a core-rule name with no explicit base is `IncrementalWithoutBase { shadows_core: true }`, whose message suggests the `NAME = <core> / extra` workaround.
+- **D35** The parser is strict per RFC 5234 for comments and prose values: both are ASCII-only. Any non-ASCII byte anywhere in grammar text is ParseError::NonAscii, checked before tokenization; comments and prose are simply the only positions where a non-ASCII byte could otherwise have been mistaken for valid content. Subject only to the documented line-ending normalization (§4.2) and the `u64` numeric-magnitude restriction in §6.1 / D17, the hand-written parser accepts exactly the language of the canonical self-grammar (RFC 5234 §4 + Erratum 2968 + RFC 7405 §2.2). Fixtures are required to be ASCII-clean and are checked accordingly. M3 verifies the reverse direction by generating from the canonical self-grammar and requiring every generated grammar to parse successfully.
+- **D36** `max == 0` repetition bodies contribute no first-graph edges and are excluded from `reaches_prose` / `reaches_unrepresentable`.
+- **D37** Canonical spelling follows the table in §6.7: even-padded uppercase `%x`, bare case-insensitive strings, `%s` for case-sensitive, and the stated parenthesization rules.
 
 ## 14. v2 candidates (explicitly not v1)
 
