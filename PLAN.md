@@ -658,7 +658,7 @@ subdirectory.
 | **2.1** | `recognize.rs` core: terminals, concat, alternation, rule refs, memo, in-progress guard, `steps`, `MatchOptions` | hand-written unit tests per §4 construct, incl. `=/`, `%s` vs `%i`, nested optionals |
 | **2.2** | Repetition per §6.3 + `tests/repetition.rs` full table + step-count assertions | all 12 rows pass; large-bound rows assert `steps() <= c*(len+1)` |
 | **2.3** | Hygiene test (D33) | `DIGIT = "x"` + a rule referencing `HEXDIG`: `HEXDIG` matches `7`, the user `DIGIT` matches `x` and not `7`, exactly one `ShadowsCoreRule`, no errors |
-| **2.4** | Corpus harness, JSONTestSuite import, `NOTES.md` | every `y_*` accepted, every `n_*` rejected, `i_*` recorded |
+| **2.4** | Corpus harness, JSONTestSuite import, `NOTES.md`, `PROVENANCE.md` | all 95 `y_` accepted and all 174 decodable `n_` rejected — no disagreement with the suite at all; 12 `n_` moved to `indeterminate/` for invalid UTF-8 and 2 for depth, each listed in `NOTES.md` |
 | **2.5** | `tests/self_definition.rs` (D23) | the canonical self-grammar accepts every fixture's CRLF-normalized text |
 | **2.6** | Brute-force enumerator + proptest (§4.3); memo-off equivalence test | property tests green at the default case count |
 | **2.7** | Compatibility limits end to end; CLI `match` with §11 exit codes, incl. invalid UTF-8 → exit 2 (D14) | the prose fixture errors from a reaching start rule and returns `Ok` from a non-reaching one |
@@ -694,7 +694,7 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 
 | # | Risk | Mitigation |
 |---|---|---|
-| R1 | **Stack overflow in `recognize` on deeply nested input.** JSONTestSuite ships `n_structures_100000_opening_arrays.json` and friends; recursion depth there is ~input length. | Run corpus tests on a thread with an explicit 64 MB stack (`std::thread::Builder::stack_size`). If it still blows, classify those specific cases in `NOTES.md` as depth-limited and document the limit. Decide in PR 2.4, not later. |
+| R1 | **Stack overflow in `recognize` on deeply nested input.** **Fired in M2.4, and worse than expected**: the cost is ~10 KB of stack per level of input nesting, so the 2 MB a test thread gets by default overflows at depth **200**, not at the 100,000 the two giant fixtures reach. Measured: 8 MB reaches 500, 64 MB reaches ~5,000, 256 MB reaches 20,000. | Corpus tests run on a 64 MB stack, which covers everything in the suite except the two 100,000-deep files; those are classified depth-limited in `NOTES.md`. **Not fully mitigated**: with default options the *library* aborts the process rather than returning an error, and `max_steps` bounds it only if the caller sets one. See §6.1 below. |
 | R2 | **Rule 2 implemented as "any branch that reaches an uncovered unit" rather than `argmin dist`.** It is the natural simplification, it passes the JSON coverage test, and it is wrong — D38's termination argument needs the strictly decreasing measure. | The chase test is the guard: rev 5.2 records that the naive version fails it with `OutputLimit`. Keep the debug assertion of R10 as the second line of defence, and do not relax the chase fixture to something shallower. |
 | R3 | ~~Witness cycles from a round-robin `min_len` fixpoint.~~ **Closed in M1.6.** | Knuth worklist (§4.1) with `(min_len, depth)` ordering, plus a debug assertion — live on every `check`, so it runs over all nine fixtures and every test grammar — that following witnesses from any productive node terminates within `nodes.len()` steps. |
 | R4 | ~~Fixture transcription errors across seven RFC grammars, by hand.~~ **Retired in M1.3: nothing was transcribed by hand.** | `scripts/extract-fixtures.py` derives all nine fixtures from the RFC texts and is verified to reproduce them byte for byte. Three independent checks passed: every content line appears verbatim in its source RFC, no fixture has an undefined rule reference, and the two derived fixtures differ from their base by exactly the errata substitutions and the RFC 7405 splice. The M4 cross-check against `abnfgen` / go-abnf still stands. |
@@ -704,6 +704,33 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 | R8 | The ASCII-cleanliness scan and the deliberately non-ASCII invalid fixture contradict each other. | Scope the scan to exclude `tests/grammars/invalid/parse/` (PR 1.1 / 1.3). Small, but it will fail CI on the day the fixture lands if nobody planned for it. |
 | R9 | Memo clone cost making the JSON corpus slow enough to annoy. | Accept until M4; run corpus tests in `--release`; only then consider borrowed sets. |
 | R10 | A bug in the chase degrades into a walk bounded only by `max_steps` — slow and hard to diagnose. | Debug assertion `dist[chosen] < dist[current]` on every chase step (§4.4), so the invariant fails loudly in tests rather than quietly in the field. |
+
+### 6.1 The depth limit R1 uncovered
+
+**Resolved in M2.4 by option 2 below, now SCOPE D42.** Kept here for the measurements, which
+are what set the default.
+
+The recognizer recurses once per grammar node, and one level of input nesting costs several
+nodes — six, for RFC 8259. Each level costs about 2 KB of stack in a debug build, measured by
+bisecting the overflow point:
+
+| stack | deepest depth that survives |
+|---|---|
+| 512 KB | 128 |
+| 1 MB | 400 |
+| 2 MiB — a spawned thread's default | 900 |
+| 64 MB | ~30,000 |
+
+The failure mode was the problem more than the ceiling: a stack overflow aborts the process, so
+a caller cannot treat it as "could not decide" the way `StepLimit` is treated. The options were
+to document it, to add a limit, or to make the walk iterative. Adding `MatchOptions::max_depth`
+won: it is small, it turns a crash into the error shape the rest of the design already uses, and
+it leaves the recursive implementation — the thing that makes `recognize.rs` readable against
+§6.2 — alone.
+
+The default is `256`, which sits under the 1 MB row so it holds wherever the recognizer is
+called from, and allows JSON nested about 40 deep. It is the only limit in the crate with a
+finite default, because it is the only one whose absence cannot be reported.
 
 ---
 
