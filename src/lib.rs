@@ -31,6 +31,7 @@
 mod ast;
 mod check;
 mod core_rules;
+mod display;
 mod error;
 mod generate;
 mod lint;

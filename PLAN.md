@@ -174,8 +174,8 @@ Why an arena rather than putting an `id` field on `Element`: §6.7 defines node 
 the ids come out of the construction for free instead of needing a numbering pass and an
 unassigned sentinel at the parse layer. Analyses become dense `Vec<T>` indexed by the same
 number, and so does `dist_to_uncovered` (§4.4). The recognizer and generator walk by index
-rather than chasing `Box`es. The cost is a second element representation; see the `ElemView`
-note below for how to avoid duplicating the printer with it.
+rather than chasing `Box`es. The cost is a second element representation, and with it the risk
+of a second printer; §3.10 says how that is avoided.
 
 **Naming.** Public types take their names from the productions of the ABNF self-grammar
 (RFC 5234 §4) wherever one exists: `CharVal`, `NumVal`, `ProseVal`, `DefinedAs`, `RuleName`,
@@ -199,10 +199,11 @@ Three details that are easy to get wrong:
 - `Repeat.max: Option<u64>` rather than a sentinel — `None` is genuinely unbounded, and a
   sentinel would collide with the legal literal `*18446744073709551615`.
 
-**`ElemView`.** Both layers need a canonical printer obeying the §6.7 spelling table, and
-duplicating ~70 lines of printer twice is a poor use of the line budget (§7). Define a tiny
-borrowed view — `enum ElemView<'a> { Alt(&'a [..]), Concat(..), … }` — that each representation
-can produce in O(1), and write `write_element(w, ElemView)` once.
+**One printer, not two.** Both layers need the §6.7 spelling table, and duplicating ~90 lines
+of printer is a poor use of the line budget (§7). The `ElemView` borrowed-view enum sketched in
+earlier revisions does not work: for `Element` the children are `&Element` values, for `Node`
+they are `NodeId`s needing the arena, and no non-allocating enum spans both. See §3.10 for what
+replaces it.
 
 ### 3.2 `parse.rs` — recursive descent, syntax only
 
@@ -428,6 +429,18 @@ be a breaking change.
 ones. `CheckError` needs `DuplicateDefinition`, `IncrementalWithoutBase { name, shadows_core }`,
 `UndefinedRule`, `InvalidRepeatRange`, `InvalidNumericRange`, `LeftRecursion`.
 
+### 3.10 `display.rs` — canonical form for both layers
+
+Not in SCOPE §5's file list; it is here because `ast.rs` is already the widest file in the crate
+and canonical spelling is its own concern, extended rather than rewritten when `CheckedGrammar`
+gains a `Display` in M1.4.
+
+The printer is written once, against the syntactic `Element`, with a three-valued context
+(`Free` / `Concat` / `Repeat`) deciding parentheses. For M1.4, rather than abstracting over both
+representations, give `CheckedGrammar` a small `fn element_at(&self, NodeId) -> Element` that
+rebuilds a subtree from the arena and hand it to the same printer. It allocates, which does not
+matter for `Display`, and it is ~15 lines against ~90 duplicated ones.
+
 ---
 
 ## 4. Algorithms worth writing down before coding
@@ -557,7 +570,7 @@ current one's tests pass (SCOPE §8).
 |---|---|---|
 | **0.1** | `Cargo.toml` (edition 2024, `cli` feature opt-in, `proptest` dev-dep), `src/lib.rs` with crate lints, empty modules, `src/bin/abnf-oracle.rs` stub, `.gitattributes`, `LICENSE` (MIT/Apache-2.0 dual), `README.md` stub, `tests/` + `tests/grammars/` + `tests/corpus/` layout | `cargo build` and `cargo build --features cli` |
 | **0.2** | `.github/workflows/ci.yml`: `fmt --check`, `clippy -- -D warnings`, `test`, each × {default, `--features cli`}, plus `cargo doc` under `RUSTDOCFLAGS=-D warnings` — the only check that catches a broken intra-doc link; `rust-toolchain.toml` pinning stable | CI green on the empty crate |
-| **0.3** | `ast.rs` both layers per §3.1 (incl. the span newtype; `ElemView` lands in 1.2 with the printer that uses it); `error.rs` enum skeletons; `rng.rs` + committed test vectors | `cargo test` passes |
+| **0.3** | `ast.rs` both layers per §3.1 (incl. the span newtype); `error.rs` enum skeletons; `rng.rs` + committed test vectors | `cargo test` passes |
 
 `.gitattributes` matters more than it looks on a Windows checkout: `*.abnf text eol=lf`,
 `tests/corpus/** -text` (corpus files are raw bytes, §9), `*.rs text eol=lf`.
@@ -635,7 +648,7 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 | R4 | Fixture transcription errors across seven RFC grammars, by hand. | Header comment naming RFC + section + errata; a test asserting each fixture checks clean; cross-check against `abnfgen` / go-abnf in M4. Transcribe from RFC text, never from memory or third-party copies. |
 | R5 | Git line-ending mangling on Windows silently changing corpus bytes. | `.gitattributes` in PR 0.1, plus a test reading one known corpus file and asserting its exact byte length. |
 | R6 | ~~Errata 2968 / 3076 wording taken from memory rather than the errata page.~~ **Fired, and was caught in M1.1.** SCOPE rev 5.2 had the two errata's subjects transposed and treated 3076 as a numeric-value clarification, which would have left `rulelist` ambiguous in the canonical fixture. | Fixed in SCOPE rev 5.3 / D39. The mitigation stands for PR 1.3: paste the corrected productions into each fixture header, from the errata page, never from memory. |
-| R7 | **Line-budget pressure** (~3,500 lines, §15). The two-layer split added a representation and a lowering pass; D38 added the generatable graph and the BFS. The budget below totals 3,430 — about 70 lines of slack. | `ElemView` instead of two printers (§3.1); check at each milestone with `tokei`. If it overruns, the honest first cut is terser `Display` impls in `error.rs`, not a required behaviour. |
+| R7 | **Line-budget pressure** (~3,500 lines, §15). The two-layer split added a representation and a lowering pass; D38 added the generatable graph and the BFS; M1.2 added `display.rs`. | One printer for both layers (§3.10); check at each milestone with `tokei`. If it overruns, the honest first cut is terser `Display` impls in `error.rs`, not a required behaviour. |
 | R8 | The ASCII-cleanliness scan and the deliberately non-ASCII invalid fixture contradict each other. | Scope the scan to exclude `tests/grammars/invalid/parse/` (PR 1.1 / 1.3). Small, but it will fail CI on the day the fixture lands if nobody planned for it. |
 | R9 | Memo clone cost making the JSON corpus slow enough to annoy. | Accept until M4; run corpus tests in `--release`; only then consider borrowed sets. |
 | R10 | A bug in the chase degrades into a walk bounded only by `max_steps` — slow and hard to diagnose. | Debug assertion `dist[chosen] < dist[current]` on every chase step (§4.4), so the invariant fails loudly in tests rather than quietly in the field. |
@@ -647,7 +660,8 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 | Module | Budget | Δ vs rev 5 plan |
 |---|---|---|
 | `ast.rs` | 300 | — |
-| `parse.rs` | 550 | — |
+| `parse.rs` | 650 | +100 (canonicalization) |
+| `display.rs` | 200 | new (§3.10) |
 | `core_rules.rs` | 120 | — |
 | `check.rs` | 850 | — |
 | `lint.rs` | 200 | — |
@@ -656,19 +670,26 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 | `rng.rs` | 60 | — |
 | `error.rs` | 300 | — |
 | `lib.rs` | 100 | — |
-| **Total** | **3,430** | **+50** |
+| **Total** | **3,680** | **+250** |
 
-CLI (~300 lines) and tests are excluded from the budget per §15. Roughly 70 lines of headroom;
-`ElemView` is what keeps it positive.
+CLI (~300 lines) and tests are excluded from the budget per §15.
 
-**Actuals** (update as modules land). After M0, with `ast.rs`, `error.rs` and `rng.rs`
-essentially complete: 946 non-test lines, of which 561 are code and 385 are doc comments.
-`ast.rs` is 483 against 300 budgeted and `error.rs` 366 against 300 — the overage is almost
-entirely the doc comment per public field and variant that `#![deny(missing_docs)]` requires of
-a data model this wide. Two readings of §15 are available and they disagree: counting every
-non-test line puts the crate on course to strain 3,500, while counting code lines only leaves it
-comfortable. Worth settling the measuring convention at M1, with real data from `parse.rs` and
-`check.rs`, rather than trimming documentation to hit a number.
+**Actuals** (non-blank, non-test lines; update as modules land). After M1.2, with `ast.rs`,
+`parse.rs`, `display.rs`, `error.rs` and `rng.rs` essentially complete: **1,672 lines, of which
+1,167 are code and 505 are doc comments.** Against the 2,120 still budgeted for `core_rules`,
+`check`, `lint`, `recognize` and `generate`, that projects to ~3,790 — over §15's ~3,500, and the
+re-derived budget above (3,680) is already over it too.
+
+The overage is documentation, not code: 30% of every written line so far is a doc comment, which
+is what `#![deny(missing_docs)]` costs on a public data model this wide, plus the running
+citations back to SCOPE that make the code auditable against the spec. On a code-only count the
+crate sits at 1,167 and would land near 2,600 — comfortably inside.
+
+So §15 needs a measuring convention, not a diet. Recommendation: count code lines only, and say
+so in §15. The alternative — hitting 3,500 on a whole-line count — means deleting the
+cross-references to SCOPE decisions, and those are what let a reader check the implementation
+against the spec at all. Decide at M1.7, when `check.rs` has landed and the largest remaining
+unknown is resolved.
 
 ---
 

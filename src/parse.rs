@@ -1,9 +1,9 @@
 //! Grammar text to [`Grammar`]: hand-written recursive descent.
 //!
-//! Syntax only. This module produces the syntactic layer faithfully — `=/` is still separate
-//! from `=`, names are unresolved, and there are no node ids (SCOPE.md 6.7, D32). The local
-//! canonicalizing rewrites (`*1a` to `[a]`, `1*1a` to `a`, flattening nested alternations and
-//! concatenations) land with the printer in M1.2; nothing here rewrites what was written.
+//! Syntax only: `=/` is still separate from `=`, names are unresolved, and there are no node
+//! ids — merging, resolution and ids are `check`'s job (SCOPE.md 6.7, D32). The local rewrites
+//! that need no knowledge of other rules *are* applied here, on the way out of each rule body;
+//! see [`canonicalize`].
 //!
 //! # The grammar implemented
 //!
@@ -311,7 +311,7 @@ impl<'a> Parser<'a> {
         let start = self.pos;
         let name = self.rulename()?;
         let defined_as = self.defined_as()?;
-        let body = self.elements()?;
+        let body = canonicalize(self.elements()?);
         self.c_nl()?;
         Ok(Definition {
             name,
@@ -615,6 +615,62 @@ impl<'a> Parser<'a> {
 ///
 /// An alternation of one concatenation is just that concatenation; building a one-branch node
 /// and unwrapping it later would only give M1.2 more to undo.
+/// Applies the local rewrites of SCOPE.md 6.7 to a rule body.
+///
+/// "Local" means needing no knowledge of any other rule, which is the test for whether a rewrite
+/// belongs at the syntactic layer at all (D32). There are two kinds:
+///
+/// * **Redundant structure.** A group is pure precedence, so `a (b c)` parses to a concatenation
+///   holding a concatenation, and `a / (b / c)` to an alternation holding an alternation. Both
+///   are flattened, and a one-child alternation or concatenation is unwrapped. This is not
+///   cosmetic: coverage units are `(alternation node, branch index)` pairs, so leaving the nested
+///   shape would give `a / (b / c)` four units where `a / b / c` has three, for two spellings of
+///   one language (D31).
+/// * **Repetition spellings.** `*1a` becomes `[a]` and `1*1a` becomes `a`, so the three ways of
+///   writing an optional element and the two ways of writing a bare one are indistinguishable
+///   downstream.
+///
+/// One bottom-up pass reaches the fixpoint: a node is rewritten only after its children are
+/// canonical, so an unwrapping that exposes a new nesting — `x (1*1(a b)) y` — is flattened by
+/// the parent on the way back up.
+fn canonicalize(element: Element) -> Element {
+    match element {
+        Element::Alt(branches) => {
+            let mut flattened = Vec::with_capacity(branches.len());
+            for branch in branches {
+                match canonicalize(branch) {
+                    Element::Alt(nested) => flattened.extend(nested),
+                    other => flattened.push(other),
+                }
+            }
+            unwrap_single(flattened, Element::Alt)
+        }
+        Element::Concat(items) => {
+            let mut flattened = Vec::with_capacity(items.len());
+            for item in items {
+                match canonicalize(item) {
+                    Element::Concat(nested) => flattened.extend(nested),
+                    other => flattened.push(other),
+                }
+            }
+            unwrap_single(flattened, Element::Concat)
+        }
+        Element::Repeat { repeat, body } => {
+            let body = canonicalize(*body);
+            match (repeat.min, repeat.max) {
+                (0, Some(1)) => Element::Optional(Box::new(body)),
+                (1, Some(1)) => body,
+                _ => Element::Repeat {
+                    repeat,
+                    body: Box::new(body),
+                },
+            }
+        }
+        Element::Optional(body) => Element::Optional(Box::new(canonicalize(*body))),
+        terminal => terminal,
+    }
+}
+
 fn unwrap_single(mut items: Vec<Element>, combine: fn(Vec<Element>) -> Element) -> Element {
     if items.len() == 1 {
         items.pop().expect("length checked")
@@ -740,9 +796,10 @@ mod tests {
         assert_eq!(body("2*5\"a\""), repeat(2, Some(5), ci("a")));
         assert_eq!(body("*3\"a\""), repeat(0, Some(3), ci("a")));
         assert_eq!(body("3*\"a\""), repeat(3, None, ci("a")));
-        // Rewriting these two is M1.2's job; M1.1 records what was written.
-        assert_eq!(body("*1\"a\""), repeat(0, Some(1), ci("a")));
-        assert_eq!(body("1*1\"a\""), repeat(1, Some(1), ci("a")));
+        // Canonicalization collapses the redundant spellings on the way out of the parser
+        // (SCOPE.md 6.7), so these two never reach the rest of the crate as repetitions.
+        assert_eq!(body("*1\"a\""), Element::Optional(Box::new(ci("a"))));
+        assert_eq!(body("1*1\"a\""), ci("a"));
     }
 
     #[test]
