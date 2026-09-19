@@ -317,6 +317,13 @@ pub enum MatchError {
     },
     /// `MatchOptions::max_steps` was exceeded. Never a silent reject (D16).
     StepLimit,
+    /// `MatchOptions::max_depth` was exceeded.
+    ///
+    /// The recognizer descends recursively, so nesting in the *input* becomes depth on the
+    /// call stack. Without this limit a deeply nested input overflows the stack, and a stack
+    /// overflow aborts the process — it cannot be caught and reported as "could not decide",
+    /// which is what every other limit here does.
+    DepthLimit,
 }
 
 impl fmt::Display for MatchError {
@@ -335,6 +342,9 @@ impl fmt::Display for MatchError {
                 write!(f, "left recursion detected at rule `{rule}`")
             }
             Self::StepLimit => f.write_str("step limit exceeded"),
+            Self::DepthLimit => f.write_str(
+                "recursion depth limit exceeded; the input nests more deeply than                  `MatchOptions::max_depth` allows",
+            ),
         }
     }
 }

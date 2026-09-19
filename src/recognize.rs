@@ -19,14 +19,82 @@ use crate::ast::{CharVal, Node, NodeId, NumVal, Repeat};
 use crate::check::CheckedGrammar;
 use crate::error::MatchError;
 
+/// How deep the recognizer may recurse before giving up: [`MatchOptions::max_depth`]'s default.
+///
+/// Chosen to be safe on a 1 MB stack, the smallest a caller is realistically on, and measured
+/// rather than guessed — see the table on [`MatchOptions::max_depth`].
+pub const DEFAULT_MAX_DEPTH: usize = 256;
+
 /// Resource limits for recognition.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatchOptions {
     /// Give up after this many steps, rather than running unboundedly.
     ///
     /// Default `None`. Exceeding it is [`MatchError::StepLimit`], never a silent rejection:
     /// "does not match" and "could not decide" are different answers (D16).
     pub max_steps: Option<u64>,
+
+    /// Give up after recursing this deep. Default [`DEFAULT_MAX_DEPTH`].
+    ///
+    /// # Why this one has a default when `max_steps` does not
+    ///
+    /// Exceeding a step limit returns [`MatchError::StepLimit`]; exceeding the *stack* aborts
+    /// the process, and no caller can catch that or report it as "could not decide". An oracle
+    /// is fed adversarial input by design, so the safe default is a limit rather than a crash.
+    ///
+    /// # Depth, stack, and how they relate
+    ///
+    /// Depth counts **grammar nodes entered**, not input characters. Nesting in the input turns
+    /// into depth because a recursive rule re-enters itself, at a rate the grammar fixes: for
+    /// RFC 8259 one level of `[` costs six nodes, so the default allows JSON nested about 40
+    /// deep. A flat input costs almost nothing however long it is — length is not the problem,
+    /// nesting is.
+    ///
+    /// Each level costs roughly 2 KB of stack, measured on a debug build; a release build uses
+    /// less. That fixes the ceiling at about one level per 2 KB:
+    ///
+    /// | stack | deepest safe `max_depth` |
+    /// |---|---|
+    /// | 512 KB | 128 |
+    /// | 1 MB | 400 |
+    /// | 2 MiB — what [`std::thread`] gives a spawned thread | 900 |
+    /// | 64 MB | ~30,000 |
+    ///
+    /// The default sits under the 1 MB row, so it is safe wherever the recognizer is called
+    /// from. Raising it means giving the recognizer a bigger stack to match:
+    ///
+    /// ```no_run
+    /// # use abnf_oracle::{Grammar, MatchOptions, Recognizer};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let src = "start = \"a\"\r\n";
+    /// # let grammar = Grammar::parse(src)?.check().map_err(|e| format!("{e:?}"))?;
+    /// std::thread::Builder::new()
+    ///     .stack_size(64 * 1024 * 1024)
+    ///     .spawn(move || {
+    ///         let mut recognizer = Recognizer::new(&grammar, "a").with_options(MatchOptions {
+    ///             max_depth: Some(40_000),
+    ///             ..MatchOptions::default()
+    ///         });
+    ///         recognizer.accepts("start")
+    ///     })?
+    ///     .join()
+    ///     .expect("no overflow")?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// `None` removes the limit, which is only safe if the input's nesting is already bounded
+    /// by something else.
+    pub max_depth: Option<usize>,
+}
+
+impl Default for MatchOptions {
+    fn default() -> Self {
+        Self {
+            max_steps: None,
+            max_depth: Some(DEFAULT_MAX_DEPTH),
+        }
+    }
 }
 
 /// What is known about one `(rule, position)` pair.
@@ -49,6 +117,8 @@ pub struct Recognizer<'g, 'i> {
     input: Vec<char>,
     memo: HashMap<(usize, usize), Memo>,
     steps: u64,
+    /// How deep the walk currently is, so the limit can be enforced on the way down.
+    depth: usize,
     options: MatchOptions,
     memoize: bool,
 }
@@ -63,6 +133,7 @@ impl<'g, 'i> Recognizer<'g, 'i> {
             input: input.chars().collect(),
             memo: HashMap::new(),
             steps: 0,
+            depth: 0,
             options: MatchOptions::default(),
             memoize: true,
         }
@@ -136,7 +207,29 @@ impl<'g, 'i> Recognizer<'g, 'i> {
     }
 
     /// The end positions of `node`, starting at `pos`.
+    ///
+    /// Every descent goes through here, so this is where the depth limit is enforced — before
+    /// the frame that would overflow is pushed rather than after.
     fn match_node(&mut self, node: NodeId, pos: usize) -> Result<BTreeSet<usize>, MatchError> {
+        self.depth += 1;
+        if self
+            .options
+            .max_depth
+            .is_some_and(|limit| self.depth > limit)
+        {
+            self.depth -= 1;
+            return Err(MatchError::DepthLimit);
+        }
+        let ends = self.match_node_inner(node, pos);
+        self.depth -= 1;
+        ends
+    }
+
+    fn match_node_inner(
+        &mut self,
+        node: NodeId,
+        pos: usize,
+    ) -> Result<BTreeSet<usize>, MatchError> {
         // Taken out of `self` so the grammar can be read while the memo table is written.
         let grammar = self.grammar;
         match grammar.node(node) {
@@ -599,6 +692,96 @@ mod tests {
                 .expect("recognizes")
                 .is_empty()
         );
+    }
+
+    // -- the depth limit ---------------------------------------------------------------------
+
+    #[test]
+    fn ordinary_nesting_is_well_within_the_default() {
+        // The default has to be generous enough that normal input never meets it.
+        let grammar = checked("start = \"(\" start \")\" / \"x\"\r\n");
+        let input = format!("{}x{}", "(".repeat(30), ")".repeat(30));
+        assert!(
+            Recognizer::new(&grammar, &input)
+                .accepts("start")
+                .expect("recognizes")
+        );
+    }
+
+    #[test]
+    fn deeper_than_the_default_is_an_error_not_a_rejection() {
+        // The whole point of the limit: an answer the caller can act on, rather than a stack
+        // overflow, which aborts the process and cannot be caught.
+        let grammar = checked("start = \"(\" start \")\" / \"x\"\r\n");
+        let input = format!("{}x{}", "(".repeat(5_000), ")".repeat(5_000));
+        assert!(matches!(
+            Recognizer::new(&grammar, &input).accepts("start"),
+            Err(MatchError::DepthLimit)
+        ));
+    }
+
+    #[test]
+    fn the_limit_can_be_raised_or_removed() {
+        let grammar = checked("start = \"(\" start \")\" / \"x\"\r\n");
+        let input = format!("{}x{}", "(".repeat(200), ")".repeat(200));
+
+        assert!(matches!(
+            Recognizer::new(&grammar, &input)
+                .with_options(MatchOptions {
+                    max_depth: Some(16),
+                    ..MatchOptions::default()
+                })
+                .accepts("start"),
+            Err(MatchError::DepthLimit)
+        ));
+        assert!(
+            Recognizer::new(&grammar, &input)
+                .with_options(MatchOptions {
+                    max_depth: Some(2_000),
+                    ..MatchOptions::default()
+                })
+                .accepts("start")
+                .expect("recognizes")
+        );
+        assert!(
+            Recognizer::new(&grammar, &input)
+                .with_options(MatchOptions {
+                    max_depth: None,
+                    ..MatchOptions::default()
+                })
+                .accepts("start")
+                .expect("recognizes"),
+            "None removes the limit"
+        );
+    }
+
+    #[test]
+    fn length_alone_costs_no_depth() {
+        // Depth tracks nesting, not size: a flat input of any length stays shallow, which is
+        // what makes a low default workable.
+        let grammar = checked("start = *\"a\"\r\n");
+        let input = "a".repeat(100_000);
+        assert!(
+            Recognizer::new(&grammar, &input)
+                .accepts("start")
+                .expect("recognizes")
+        );
+    }
+
+    #[test]
+    fn the_depth_limit_does_not_leak_between_calls() {
+        // The counter is decremented on the way back up, including on the error path, so a
+        // recognizer that hit the limit once still works afterwards.
+        let grammar = checked("start = \"(\" start \")\" / \"x\"\r\n");
+        let deep = format!("{}x{}", "(".repeat(5_000), ")".repeat(5_000));
+        let mut recognizer = Recognizer::new(&grammar, &deep);
+        assert!(matches!(
+            recognizer.accepts("start"),
+            Err(MatchError::DepthLimit)
+        ));
+
+        let mut shallow = Recognizer::new(&grammar, "((x))");
+        assert!(shallow.accepts("start").expect("recognizes"));
     }
 
     #[test]

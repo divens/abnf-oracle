@@ -172,8 +172,10 @@ fn the_step_limit_is_an_error_not_a_rejection() {
         .check()
         .expect("checks");
     let input = "a".repeat(64);
-    let mut recognizer =
-        Recognizer::new(&grammar, &input).with_options(MatchOptions { max_steps: Some(3) });
+    let mut recognizer = Recognizer::new(&grammar, &input).with_options(MatchOptions {
+        max_steps: Some(3),
+        ..Default::default()
+    });
     assert!(matches!(
         recognizer.accepts("start"),
         Err(abnf_oracle::MatchError::StepLimit)
