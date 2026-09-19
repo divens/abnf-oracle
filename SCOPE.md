@@ -99,7 +99,7 @@ abnf-oracle/
 ├── SCOPE.md                   ← this file
 ├── src/
 │   ├── lib.rs                 public API re-exports
-│   ├── ast.rs                 Grammar, Rule, Element, Repeat, StringLit, NumVal, node ids
+│   ├── ast.rs                 Grammar, Rule, Element, Repeat, CharVal, NumVal, node ids
 │   ├── parse.rs               grammar text → Grammar (hand-written recursive descent; local rewrites only, no merging)
 │   ├── core_rules.rs          Appendix B rules as a Grammar constant
 │   ├── check.rs               rule-table build (=/ merge, duplicates, core resolution) → CheckedGrammar; analyses; node ids

@@ -1,0 +1,11 @@
+# Text files are LF in the working tree everywhere, so fixtures and expected
+# output do not depend on the checkout platform (the tests run on Windows too).
+* text=auto eol=lf
+*.rs text eol=lf
+*.md text eol=lf
+*.toml text eol=lf
+*.abnf text eol=lf
+
+# Corpus inputs are raw bytes and are the source of truth (SCOPE.md 9).
+# Git must never translate them, in either direction.
+tests/corpus/** -text
