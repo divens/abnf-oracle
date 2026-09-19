@@ -43,4 +43,5 @@ pub use ast::{
     CharVal, DefinedAs, Definition, Element, Grammar, Ignored, MinLen, Node, NodeId, NumVal,
     ParseOptions, Repeat, Rule, RuleId, RuleName, Span, Witness,
 };
+pub use check::CheckedGrammar;
 pub use error::{CheckError, GenError, LintWarning, MatchError, ParseError};

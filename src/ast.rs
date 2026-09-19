@@ -304,6 +304,14 @@ impl Grammar {
         &self.defs
     }
 
+    /// Consumes the grammar, yielding its definitions.
+    ///
+    /// For `check`, which takes ownership (D1) and has no reason to clone every rule body.
+    #[must_use]
+    pub fn into_definitions(self) -> Vec<Definition> {
+        self.defs
+    }
+
     /// The options this grammar was parsed with.
     ///
     /// Provenance only: excluded from equality, never serialized (D21).

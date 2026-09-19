@@ -1,0 +1,7 @@
+; Invalid on purpose: defines the same rule twice with "=".
+; A second definition is a duplicate; extending needs "=/" (SCOPE.md 4.1).
+; Expected: CheckError::DuplicateDefinition
+; Errata applied: none
+
+start          =  "a"
+start          =  "b"

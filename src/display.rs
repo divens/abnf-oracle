@@ -20,6 +20,7 @@
 use core::fmt;
 
 use crate::ast::{CharVal, DefinedAs, Definition, Element, Grammar, NumVal, Repeat};
+use crate::check::CheckedGrammar;
 
 impl fmt::Display for Grammar {
     /// Writes the grammar in canonical form: the definitions as written, one per line.
@@ -38,6 +39,25 @@ impl fmt::Display for Grammar {
             write!(f, "{definition}")?;
             // Every line is terminated, including the last: `rule` ends in `c-nl`, so a grammar
             // without a final line ending would not parse back.
+            f.write_str("\r\n")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for CheckedGrammar {
+    /// Writes the merged rule table: one rule per line, `=/` folded in, in first-definition
+    /// order. Implicit core rules are never printed — they are the resolution environment, not
+    /// part of the grammar (D12).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.rules().is_empty() {
+            return f.write_str("\r\n");
+        }
+        for rule in self.rules() {
+            // Rebuilt from the arena rather than printed by a second, arena-shaped printer:
+            // one canonical form should have exactly one implementation (PLAN.md 3.10).
+            write!(f, "{} = ", rule.name)?;
+            write_element(f, &self.element_at(rule.body), Context::Free)?;
             f.write_str("\r\n")?;
         }
         Ok(())

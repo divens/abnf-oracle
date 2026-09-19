@@ -1,0 +1,8 @@
+; Invalid on purpose: "=/" against an implicit core rule.
+; Extending a rule that was never written down has no coherent meaning under
+; hygienic resolution; shadow and extend it instead (SCOPE.md 4.1, D34).
+; Expected: CheckError::IncrementalWithoutBase { shadows_core: true }
+; Errata applied: none
+
+start          =  DIGIT
+DIGIT          =/ "x"

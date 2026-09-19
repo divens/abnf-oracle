@@ -600,7 +600,7 @@ Nine PRs; this is the bulk of the project.
 | **1.1** | `parse.rs`: ASCII gate, scanner-level line endings, `strict_crlf`, all productions (§3.2 steps 1–6) | unit tests for every §4 construct parse to the expected AST; `NonAscii` and `ExpectedCrlf` fire where expected |
 | **1.2** | Local rewrites (§3.2 step 7); `Display` + `PartialEq` for the **syntactic** layer | `Grammar::parse(g.to_string()) == g`; `*1a` ≡ `[a]`; canonical spelling unit-tested against the §6.7 table row by row |
 | **1.3** | `core_rules.rs` + `scripts/extract-fixtures.py` deriving all nine fixtures from RFC text; `tests/parse_grammars.rs`; the ASCII-cleanliness scan | every fixture parses and round-trips, under both line-ending settings; the scan passes |
-| **1.4** | `check.rs` steps 1–3: rule-table build, lowering + node ids, hygienic resolution; `Display` + `PartialEq` for `CheckedGrammar` | `Grammar::parse(cg.to_string()).check() == cg`; duplicate / orphan `=/` / `shadows_core` fixtures fail with the right variant; two textually different grammars with one canonical form get identical node ids |
+| **1.4** | `check.rs` steps 1–3: rule-table build, lowering + node ids, hygienic resolution; `Display` + `PartialEq` for `CheckedGrammar`; the four check-error fixtures under `invalid/` | `Grammar::parse(cg.to_string()).check() == cg` on every fixture; duplicate / orphan `=/` / `shadows_core` fixtures fail with the right variant; two textually different grammars with one canonical form get identical node ids |
 | **1.5** | `check.rs` steps 4–5: range validation, representability | `5*2"a"` and `%x5A-41` fixtures fail; a surrogate-spanning range is representable, `%xD800-DFFF` is not |
 | **1.6** | `check.rs` steps 6–7: `nullable`, `min_len`, `witness` (§4.1) | unit tests incl. the saturating case (three nested `4294967295` repeats → `Finite(u64::MAX)`), the `a = b / "x"` tie, prose non-nullable |
 | **1.7** | `check.rs` steps 8–9: first-graph, left recursion, per-rule reachability | direct and indirect left-recursion fixtures fail; the prose fixture does not; a `*0(…)` body contributes no edges |
@@ -690,22 +690,16 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 
 CLI (~300 lines) and tests are excluded from the budget per §15.
 
-**Actuals** (non-blank, non-test lines; update as modules land). After M1.2, with `ast.rs`,
-`parse.rs`, `display.rs`, `error.rs` and `rng.rs` essentially complete: **1,672 lines, of which
-1,167 are code and 505 are doc comments.** Against the 2,120 still budgeted for `core_rules`,
-`check`, `lint`, `recognize` and `generate`, that projects to ~3,790 — over §15's ~3,500, and the
-re-derived budget above (3,680) is already over it too.
+**Actuals** (non-blank, non-test lines; update as modules land). After M1.4: **2,135 lines,
+1,503 code and 632 doc.** `check.rs` is 323 of its 850 with steps 1-3 of 9 done, which is on
+track — the remaining steps are analyses over a table that now exists. `parse.rs` came in at 625
+against 650, `display.rs` at 182 against 200.
 
-The overage is documentation, not code: 30% of every written line so far is a doc comment, which
-is what `#![deny(missing_docs)]` costs on a public data model this wide, plus the running
-citations back to SCOPE that make the code auditable against the spec. On a code-only count the
-crate sits at 1,167 and would land near 2,600 — comfortably inside.
-
-So §15 needs a measuring convention, not a diet. Recommendation: count code lines only, and say
-so in §15. The alternative — hitting 3,500 on a whole-line count — means deleting the
-cross-references to SCOPE decisions, and those are what let a reader check the implementation
-against the spec at all. Decide at M1.7, when `check.rs` has landed and the largest remaining
-unknown is resolved.
+The M1.2 reading holds: roughly 30% of every written line is a doc comment, and the projection
+is ~3,400 on a whole-line count against §15's ~3,500 — tighter than comfortable but no longer
+clearly over, because `check.rs` is running under budget. On a code-only count the crate would
+land near 2,400. Still worth settling the convention in §15 at M1.7, when `check.rs` is done and
+the last large unknown is resolved.
 
 ---
 

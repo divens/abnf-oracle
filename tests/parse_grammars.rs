@@ -5,13 +5,13 @@
 //! That provenance is the point: a fixture that quietly drifts from the RFC it claims to be
 //! would make every test that depends on it meaningless.
 //!
-//! `check()` lands in M1.4, at which point this file gains the assertion that every fixture
-//! checks clean as well.
+//! Deliberately broken fixtures live under `invalid/`, each naming the `CheckError` it is
+//! there to produce; `invalid/parse/` holds the ones that fail earlier, at parse time.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use abnf_oracle::{Grammar, ParseOptions};
+use abnf_oracle::{CheckError, Grammar, ParseOptions};
 
 /// Deliberately broken fixtures live here; other tests assert how they fail.
 const INVALID: &str = "invalid";
@@ -224,4 +224,104 @@ fn every_fixture_is_ascii_clean() {
             );
         }
     }
+}
+
+#[test]
+fn every_fixture_checks() {
+    for path in valid_fixtures() {
+        let src = read(&path);
+        let grammar = Grammar::parse(&src).expect("parses");
+        if let Err(errors) = grammar.check() {
+            panic!(
+                "{} did not check: {}",
+                name(&path),
+                errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            );
+        }
+    }
+}
+
+#[test]
+fn checked_fixtures_round_trip() {
+    // The semantic layer's contract: `Grammar::parse(cg.to_string()).check() == cg` (D12).
+    for path in valid_fixtures() {
+        let checked = Grammar::parse(&read(&path))
+            .expect("parses")
+            .check()
+            .expect("checks");
+        let reparsed = Grammar::parse(&checked.to_string())
+            .unwrap_or_else(|e| panic!("{}: merged form did not parse: {e}", name(&path)))
+            .check()
+            .unwrap_or_else(|e| panic!("{}: merged form did not check: {e:?}", name(&path)));
+        assert_eq!(
+            checked,
+            reparsed,
+            "{} changed under round-trip",
+            name(&path)
+        );
+        assert_eq!(checked.to_string(), reparsed.to_string());
+    }
+}
+
+/// Names the `CheckError` variant a broken fixture is there to produce.
+type Predicate = fn(&CheckError) -> bool;
+
+#[test]
+fn broken_fixtures_fail_the_way_they_say_they_do() {
+    let dir = grammars_dir().join(INVALID);
+    let expected: &[(&str, Predicate)] = &[
+        ("undefined-rule.abnf", |e| {
+            matches!(e, CheckError::UndefinedRule { .. })
+        }),
+        ("duplicate-definition.abnf", |e| {
+            matches!(e, CheckError::DuplicateDefinition { .. })
+        }),
+        ("incremental-without-base.abnf", |e| {
+            matches!(
+                e,
+                CheckError::IncrementalWithoutBase {
+                    shadows_core: false,
+                    ..
+                }
+            )
+        }),
+        ("incremental-on-core-rule.abnf", |e| {
+            matches!(
+                e,
+                CheckError::IncrementalWithoutBase {
+                    shadows_core: true,
+                    ..
+                }
+            )
+        }),
+    ];
+
+    for (file, matches_variant) in expected {
+        let src = read(&dir.join(file));
+        let grammar =
+            Grammar::parse(&src).unwrap_or_else(|e| panic!("{file} should still parse: {e}"));
+        let errors = grammar.check().expect_err("{file} should not check");
+        assert!(
+            errors.iter().any(matches_variant),
+            "{file} produced the wrong error: {errors:?}"
+        );
+    }
+
+    // Every file in the directory is accounted for, so adding one without a test is caught.
+    let mut present: Vec<String> = Vec::new();
+    let mut found = Vec::new();
+    collect(&dir, &mut found, false);
+    for path in found {
+        if !path.components().any(|c| c.as_os_str() == "parse") {
+            present.push(name(&path).to_owned());
+        }
+    }
+    present.sort();
+    let mut named: Vec<String> = expected.iter().map(|(f, _)| (*f).to_owned()).collect();
+    named.sort();
+    assert_eq!(present, named, "an invalid fixture has no test");
 }

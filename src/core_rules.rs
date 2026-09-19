@@ -9,9 +9,6 @@
 //! redefining `HEXDIG`, `LWSP` and everything downstream (SCOPE.md 4.1, D33). That is `check`'s
 //! job; this module only supplies the environment.
 
-// Consumed by `check`, which lands in M1.4. Remove this when it does.
-#![allow(dead_code)]
-
 use std::sync::OnceLock;
 
 use crate::ast::Grammar;
@@ -85,8 +82,23 @@ WSP            =  SP / HTAB
 pub(crate) fn core_grammar() -> &'static Grammar {
     static CORE: OnceLock<Grammar> = OnceLock::new();
     CORE.get_or_init(|| {
-        Grammar::parse(CORE_RULES).expect("the core rules are a constant and must parse")
+        let grammar =
+            Grammar::parse(CORE_RULES).expect("the core rules are a constant and must parse");
+        assert_eq!(
+            grammar.definitions().len(),
+            CORE_RULE_COUNT,
+            "RFC 5234 Appendix B.1 defines exactly {CORE_RULE_COUNT} rules"
+        );
+        grammar
     })
+}
+
+/// Whether `name` is one of the Appendix B rules, compared case-insensitively.
+pub(crate) fn is_core_rule(name: &str) -> bool {
+    core_grammar()
+        .definitions()
+        .iter()
+        .any(|definition| definition.name.key() == name.to_ascii_lowercase())
 }
 
 #[cfg(test)]

@@ -1,0 +1,6 @@
+; Invalid on purpose: "=/" with no prior "=" for that name.
+; Expected: CheckError::IncrementalWithoutBase { shadows_core: false }
+; Errata applied: none
+
+start          =  "a"
+other          =/ "b"

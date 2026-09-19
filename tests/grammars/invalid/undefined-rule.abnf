@@ -1,0 +1,5 @@
+; Invalid on purpose: references a rule nothing defines.
+; Expected: CheckError::UndefinedRule
+; Errata applied: none
+
+start          =  "a" missing
