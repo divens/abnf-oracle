@@ -298,6 +298,19 @@ fn broken_fixtures_fail_the_way_they_say_they_do() {
                 }
             )
         }),
+        ("invalid-repeat-range.abnf", |e| {
+            matches!(e, CheckError::InvalidRepeatRange { min: 5, max: 2, .. })
+        }),
+        ("invalid-numeric-range.abnf", |e| {
+            matches!(
+                e,
+                CheckError::InvalidNumericRange {
+                    lo: 0x5A,
+                    hi: 0x41,
+                    ..
+                }
+            )
+        }),
     ];
 
     for (file, matches_variant) in expected {

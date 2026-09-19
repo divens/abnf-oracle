@@ -114,7 +114,7 @@ fn write_element(f: &mut fmt::Formatter<'_>, element: &Element, context: Context
     match element {
         Element::Alt(branches) => write_joined(f, branches, " / ", Context::Free),
         Element::Concat(items) => write_joined(f, items, " ", Context::Concat),
-        Element::Repeat { repeat, body } => {
+        Element::Repeat { repeat, body, .. } => {
             write_repeat(f, *repeat)?;
             write_element(f, body, Context::Repeat)
         }
@@ -125,7 +125,7 @@ fn write_element(f: &mut fmt::Formatter<'_>, element: &Element, context: Context
         }
         Element::RuleRef { name, .. } => write!(f, "{name}"),
         Element::CharVal(char_val) => write_char_val(f, char_val),
-        Element::NumVal(num_val) => write_num_val(f, num_val),
+        Element::NumVal { value, .. } => write_num_val(f, value),
         Element::ProseVal { text, .. } => write!(f, "<{text}>"),
     }
 }

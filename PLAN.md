@@ -185,6 +185,10 @@ one-function-per-production parser (§3.2), so the D35 invariant can be audited 
 side by side. Where no production exists, the name says what the thing does: `Ignored`, `MinLen`,
 `Witness`, `NodeId`.
 
+**Spans.** `Element::Repeat` and `Element::NumVal` carry one, because `InvalidRepeatRange` and
+`InvalidNumericRange` are reported from `check` and would otherwise point at offset 0. No other
+element needs one yet; add them where an error needs to be located, not on principle.
+
 Three details that are easy to get wrong:
 
 - **Spans must not participate in `PartialEq`.** M1 requires `*1a` and `[a]` to parse to *equal*
@@ -287,10 +291,12 @@ list.
    bodies (D33). Unknown → `UndefinedRule { name, span }`.
 4. **Range validation.** `min > max` → `InvalidRepeatRange`; `lo > hi` → `InvalidNumericRange`
    (D18).
-5. **Representability** (§6.1). A range is representable iff it contains at least one scalar
-   value: `lo <= 0x10FFFF && !(lo >= 0xD800 && hi <= 0xDFFF)`. Precompute, per representable
-   range, how many scalars it contains, so the generator can index into it uniformly in O(1)
-   (subtract the surrogate block when the range spans it).
+5. **Representability** (§6.1). Lives on `NumVal` as arithmetic — `is_representable`,
+   `scalars_in`, `nth_scalar` — not as a per-node table: the scalar count of `lo..=hi` is
+   already O(1) to compute, so there is nothing to precompute and nothing to keep in sync. The
+   per-rule `reaches_unrepresentable` flag (step 9) walks the arena calling `is_representable`.
+   `nth_scalar` is what lets the generator pick uniformly, and it steps over the surrogate
+   block rather than pretending it is not there.
 6. **`nullable`** — round-robin least fixpoint over nodes, init `false`. Prose is non-nullable
    (D26).
 7. **`min_len` + `witness`** — §4.1 below. Knuth-style worklist, *not* round-robin, because the
@@ -601,7 +607,7 @@ Nine PRs; this is the bulk of the project.
 | **1.2** | Local rewrites (§3.2 step 7); `Display` + `PartialEq` for the **syntactic** layer | `Grammar::parse(g.to_string()) == g`; `*1a` ≡ `[a]`; canonical spelling unit-tested against the §6.7 table row by row |
 | **1.3** | `core_rules.rs` + `scripts/extract-fixtures.py` deriving all nine fixtures from RFC text; `tests/parse_grammars.rs`; the ASCII-cleanliness scan | every fixture parses and round-trips, under both line-ending settings; the scan passes |
 | **1.4** | `check.rs` steps 1–3: rule-table build, lowering + node ids, hygienic resolution; `Display` + `PartialEq` for `CheckedGrammar`; the four check-error fixtures under `invalid/` | `Grammar::parse(cg.to_string()).check() == cg` on every fixture; duplicate / orphan `=/` / `shadows_core` fixtures fail with the right variant; two textually different grammars with one canonical form get identical node ids |
-| **1.5** | `check.rs` steps 4–5: range validation, representability | `5*2"a"` and `%x5A-41` fixtures fail; a surrogate-spanning range is representable, `%xD800-DFFF` is not |
+| **1.5** | `check.rs` steps 4–5: range validation, representability; spans on `Repeat` and `NumVal` so both errors can point at the offending text | `5*2"a"` and `%x5A-41` fixtures fail, with spans covering exactly `5*2` and `%x5A-41`; a surrogate-spanning range is representable, `%xD800-DFFF` is not; `%x80-FF` stays representable |
 | **1.6** | `check.rs` steps 6–7: `nullable`, `min_len`, `witness` (§4.1) | unit tests incl. the saturating case (three nested `4294967295` repeats → `Finite(u64::MAX)`), the `a = b / "x"` tie, prose non-nullable |
 | **1.7** | `check.rs` steps 8–9: first-graph, left recursion, per-rule reachability | direct and indirect left-recursion fixtures fail; the prose fixture does not; a `*0(…)` body contributes no edges |
 | **1.8** | `lint.rs` + `lint_from` | expected warnings on hand-written cases; the RFC 9110 fixture yields `ShadowsCoreRule` and no errors |

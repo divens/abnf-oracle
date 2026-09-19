@@ -1,0 +1,5 @@
+; Invalid on purpose: a repetition whose lower bound exceeds its upper bound.
+; Expected: CheckError::InvalidRepeatRange
+; Errata applied: none
+
+start          =  5*2"a"

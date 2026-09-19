@@ -400,12 +400,15 @@ impl<'a> Parser<'a> {
 
     /// `repetition = [repeat] element`
     fn repetition(&mut self) -> Result<Element, ParseError> {
+        let start = self.pos;
         let repeat = self.repeat()?;
+        let span = Ignored(self.span_from(start));
         let element = self.element()?;
         Ok(match repeat {
             Some(repeat) => Element::Repeat {
                 repeat,
                 body: Box::new(element),
+                span,
             },
             None => element,
         })
@@ -484,6 +487,7 @@ impl<'a> Parser<'a> {
     /// (`"b"`, `"x"`, `"%s"`), so `%X41` and `%S"a"` are exactly as legal as `%x41` and
     /// `%s"a"`, and rejecting them would narrow the accepted language (D35).
     fn percent(&mut self) -> Result<Element, ParseError> {
+        let start = self.pos;
         self.pos += 1;
         let marker = match self.peek() {
             Some(byte) => byte.to_ascii_lowercase(),
@@ -500,25 +504,32 @@ impl<'a> Parser<'a> {
             _ => return Err(self.expected("`b`, `d`, `x`, `s` or `i` after `%`")),
         };
         self.pos += 1;
-        self.num_val(radix)
+        self.num_val(radix, start)
     }
 
     /// `bin-val` / `dec-val` / `hex-val`, which share the shape
     /// `1*DIGIT [ 1*("." 1*DIGIT) / ("-" 1*DIGIT) ]`.
-    fn num_val(&mut self, radix: u32) -> Result<Element, ParseError> {
+    fn num_val(&mut self, radix: u32, start: usize) -> Result<Element, ParseError> {
         let first = self.number(radix)?;
         if self.peek() == Some(b'.') {
             let mut values = vec![first];
             while self.eat(b'.') {
                 values.push(self.number(radix)?);
             }
-            return Ok(Element::NumVal(NumVal::Concat(values)));
+            return Ok(self.num_val_node(NumVal::Concat(values), start));
         }
         if self.eat(b'-') {
             let hi = self.number(radix)?;
-            return Ok(Element::NumVal(NumVal::Range { lo: first, hi }));
+            return Ok(self.num_val_node(NumVal::Range { lo: first, hi }, start));
         }
-        Ok(Element::NumVal(NumVal::Scalar(first)))
+        Ok(self.num_val_node(NumVal::Scalar(first), start))
+    }
+
+    fn num_val_node(&self, value: NumVal, start: usize) -> Element {
+        Element::NumVal {
+            value,
+            span: Ignored(self.span_from(start)),
+        }
     }
 
     /// One or more digits in `radix`, as a `u64`.
@@ -655,7 +666,7 @@ fn canonicalize(element: Element) -> Element {
             }
             unwrap_single(flattened, Element::Concat)
         }
-        Element::Repeat { repeat, body } => {
+        Element::Repeat { repeat, body, span } => {
             let body = canonicalize(*body);
             match (repeat.min, repeat.max) {
                 (0, Some(1)) => Element::Optional(Box::new(body)),
@@ -663,6 +674,7 @@ fn canonicalize(element: Element) -> Element {
                 _ => Element::Repeat {
                     repeat,
                     body: Box::new(body),
+                    span,
                 },
             }
         }
@@ -721,13 +733,21 @@ mod tests {
     }
 
     fn scalar(value: u64) -> Element {
-        Element::NumVal(NumVal::Scalar(value))
+        num(NumVal::Scalar(value))
+    }
+
+    fn num(value: NumVal) -> Element {
+        Element::NumVal {
+            value,
+            span: Ignored(Span::default()),
+        }
     }
 
     fn repeat(min: u64, max: Option<u64>, body: Element) -> Element {
         Element::Repeat {
             repeat: Repeat { min, max },
             body: Box::new(body),
+            span: Ignored(Span::default()),
         }
     }
 
@@ -819,13 +839,10 @@ mod tests {
 
     #[test]
     fn numeric_range_and_concatenation() {
-        assert_eq!(
-            body("%x41-5A"),
-            Element::NumVal(NumVal::Range { lo: 0x41, hi: 0x5A })
-        );
+        assert_eq!(body("%x41-5A"), num(NumVal::Range { lo: 0x41, hi: 0x5A }));
         assert_eq!(
             body("%x41.42.43"),
-            Element::NumVal(NumVal::Concat(vec![0x41, 0x42, 0x43]))
+            num(NumVal::Concat(vec![0x41, 0x42, 0x43]))
         );
     }
 

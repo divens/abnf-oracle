@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::sync::OnceLock;
 
-use crate::ast::{DefinedAs, Element, Grammar, Node, NodeId, Rule, RuleId, RuleName, Span};
+use crate::ast::{DefinedAs, Element, Grammar, Node, NodeId, NumVal, Rule, RuleId, RuleName, Span};
 use crate::core_rules;
 use crate::error::CheckError;
 
@@ -133,9 +133,10 @@ impl CheckedGrammar {
             Node::Concat { items } => {
                 Element::Concat(items.iter().map(|i| self.element_at(*i)).collect())
             }
-            Node::Repeat { repeat, body } => Element::Repeat {
+            Node::Repeat { repeat, body, span } => Element::Repeat {
                 repeat: *repeat,
                 body: Box::new(self.element_at(*body)),
+                span: *span,
             },
             Node::Optional { body } => Element::Optional(Box::new(self.element_at(*body))),
             Node::RuleRef { name, span } => Element::RuleRef {
@@ -143,7 +144,10 @@ impl CheckedGrammar {
                 span: *span,
             },
             Node::CharVal(value) => Element::CharVal(value.clone()),
-            Node::NumVal(value) => Element::NumVal(value.clone()),
+            Node::NumVal { value, span } => Element::NumVal {
+                value: value.clone(),
+                span: *span,
+            },
             Node::ProseVal(text) => Element::ProseVal {
                 text: text.clone(),
                 span: crate::ast::Ignored(Span::default()),
@@ -300,10 +304,20 @@ impl Builder {
             Element::Concat(items) => Node::Concat {
                 items: items.iter().map(|i| self.lower(i, scope)).collect(),
             },
-            Element::Repeat { repeat, body } => Node::Repeat {
-                repeat: *repeat,
-                body: self.lower(body, scope),
-            },
+            Element::Repeat { repeat, body, span } => {
+                if !repeat.is_valid() {
+                    self.errors.push(CheckError::InvalidRepeatRange {
+                        min: repeat.min,
+                        max: repeat.max.expect("an unbounded repetition is always valid"),
+                        span: span.0,
+                    });
+                }
+                Node::Repeat {
+                    repeat: *repeat,
+                    body: self.lower(body, scope),
+                    span: *span,
+                }
+            }
             Element::Optional(body) => Node::Optional {
                 body: self.lower(body, scope),
             },
@@ -321,7 +335,23 @@ impl Builder {
                 }
             }
             Element::CharVal(value) => Node::CharVal(value.clone()),
-            Element::NumVal(value) => Node::NumVal(value.clone()),
+            Element::NumVal { value, span } => {
+                if let NumVal::Range { lo, hi } = value
+                    && lo > hi
+                {
+                    // An oracle should call a typo a typo rather than silently matching
+                    // nothing (SCOPE.md 12, item 6).
+                    self.errors.push(CheckError::InvalidNumericRange {
+                        lo: *lo,
+                        hi: *hi,
+                        span: span.0,
+                    });
+                }
+                Node::NumVal {
+                    value: value.clone(),
+                    span: *span,
+                }
+            }
             Element::ProseVal { text, .. } => Node::ProseVal(text.clone()),
         };
 
@@ -430,6 +460,77 @@ mod tests {
     }
 
     #[test]
+    fn an_inverted_repeat_range_is_a_structural_error() {
+        let found = errors("start = 5*2\"a\"\r\n");
+        assert!(
+            matches!(
+                found.as_slice(),
+                [CheckError::InvalidRepeatRange { min: 5, max: 2, .. }]
+            ),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn an_inverted_numeric_range_is_a_structural_error() {
+        let found = errors("start = %x5A-41\r\n");
+        assert!(
+            matches!(
+                found.as_slice(),
+                [CheckError::InvalidNumericRange {
+                    lo: 0x5A,
+                    hi: 0x41,
+                    ..
+                }]
+            ),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn range_errors_point_at_the_range() {
+        let src = "start = \"ok\" %x5A-41\r\n";
+        let found = errors(src);
+        let [CheckError::InvalidNumericRange { span, .. }] = found.as_slice() else {
+            panic!("{found:?}")
+        };
+        assert_eq!(
+            &src[span.range()],
+            "%x5A-41",
+            "the span must locate the typo"
+        );
+    }
+
+    #[test]
+    fn repeat_errors_point_at_the_bounds() {
+        let src = "start = \"ok\" 5*2\"a\"\r\n";
+        let found = errors(src);
+        let [CheckError::InvalidRepeatRange { span, .. }] = found.as_slice() else {
+            panic!("{found:?}")
+        };
+        assert_eq!(&src[span.range()], "5*2");
+    }
+
+    #[test]
+    fn equal_bounds_and_unbounded_repetitions_are_valid() {
+        check("start = 2*2\"a\" 3\"b\" *\"c\" 4*\"d\"\r\n");
+    }
+
+    #[test]
+    fn an_unrepresentable_terminal_is_not_a_structural_error() {
+        // It is a compatibility limit, enforced per start rule, not a reason to reject the
+        // grammar (SCOPE.md 6.1, D4). M1.7 records which rules can reach one.
+        let checked = check("start = %xD800-DFFF / %x110000\r\n");
+        assert_eq!(checked.rules().len(), 1);
+    }
+
+    #[test]
+    fn octet_grammars_check() {
+        // RFC 9110's obs-text and RFC 5322's obs-* rules must load (SCOPE.md 3).
+        check("obs-text = %x80-FF\r\nstart = obs-text\r\n");
+    }
+
+    #[test]
     fn undefined_references_are_all_reported() {
         let found = errors("foo = bar baz / qux\r\n");
         assert_eq!(found.len(), 3, "errors accumulate: {found:?}");
@@ -532,7 +633,10 @@ mod tests {
         let foo = checked.rule("foo").expect("foo exists");
         assert!(matches!(
             checked.node(foo.body),
-            Node::NumVal(NumVal::Range { lo: 0x41, hi: 0x5A })
+            Node::NumVal {
+                value: NumVal::Range { lo: 0x41, hi: 0x5A },
+                ..
+            }
         ));
     }
 

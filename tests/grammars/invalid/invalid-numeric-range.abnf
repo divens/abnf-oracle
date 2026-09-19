@@ -1,0 +1,7 @@
+; Invalid on purpose: a numeric range that ends below where it starts.
+; An oracle should call a typo a typo, not read it as the empty language
+; (SCOPE.md 12, item 6).
+; Expected: CheckError::InvalidNumericRange
+; Errata applied: none
+
+start          =  %x5A-41

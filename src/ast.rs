@@ -239,6 +239,73 @@ pub enum NumVal {
     Concat(Vec<u64>),
 }
 
+/// The largest Unicode scalar value.
+const MAX_SCALAR: u64 = 0x10_FFFF;
+/// The surrogate block, which contains no scalar value and so can never occur in input.
+const SURROGATES: (u64, u64) = (0xD800, 0xDFFF);
+
+/// How many integers `lo..=hi` and `a..=b` have in common.
+const fn overlap(lo: u64, hi: u64, a: u64, b: u64) -> u64 {
+    let start = if lo > a { lo } else { a };
+    let end = if hi < b { hi } else { b };
+    if start > end { 0 } else { end - start + 1 }
+}
+
+impl NumVal {
+    /// Whether this terminal can match anything at all (SCOPE.md 6.1).
+    ///
+    /// The matching domain is Unicode scalar values, so a value above `U+10FFFF` or inside the
+    /// surrogate block matches nothing. Being unrepresentable is *not* a structural error: the
+    /// grammar loads, and only a start rule that can reach the terminal is refused (D4). Real
+    /// grammars written over octets — RFC 9110's `obs-text = %x80-FF` — stay usable this way.
+    #[must_use]
+    pub fn is_representable(&self) -> bool {
+        match self {
+            Self::Scalar(value) => is_scalar(*value),
+            // A range need only *contain* a scalar value. One that merely spans the surrogate
+            // block is fine: surrogates cannot occur in input, so they are never matched.
+            Self::Range { lo, hi } => lo <= hi && Self::scalars_in(*lo, *hi) > 0,
+            Self::Concat(values) => values.iter().copied().all(is_scalar),
+        }
+    }
+
+    /// How many Unicode scalar values `lo..=hi` contains.
+    ///
+    /// The generator picks uniformly among them, so this has to exclude the surrogate block
+    /// rather than just measure the span.
+    #[must_use]
+    pub const fn scalars_in(lo: u64, hi: u64) -> u64 {
+        if lo > hi {
+            return 0;
+        }
+        overlap(lo, hi, 0, MAX_SCALAR) - overlap(lo, hi, SURROGATES.0, SURROGATES.1)
+    }
+
+    /// The `index`-th Unicode scalar value in `lo..=hi`, skipping the surrogate block.
+    ///
+    /// `None` once `index` reaches [`NumVal::scalars_in`], so the generator can index without
+    /// first checking the bound.
+    #[must_use]
+    pub fn nth_scalar(lo: u64, hi: u64, index: u64) -> Option<char> {
+        if index >= Self::scalars_in(lo, hi) {
+            return None;
+        }
+        let below = overlap(lo, hi, 0, SURROGATES.0 - 1);
+        // Step over the surrogate block once the low part is exhausted.
+        let value = if index < below {
+            lo + index
+        } else {
+            SURROGATES.1 + 1 + (index - below)
+        };
+        char::from_u32(u32::try_from(value).ok()?)
+    }
+}
+
+/// Whether `value` is a Unicode scalar value.
+const fn is_scalar(value: u64) -> bool {
+    value <= MAX_SCALAR && (value < SURROGATES.0 || value > SURROGATES.1)
+}
+
 /// An element of a rule body, in the syntactic layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Element {
@@ -252,6 +319,8 @@ pub enum Element {
         repeat: Repeat,
         /// The repeated element.
         body: Box<Element>,
+        /// Where the bounds sit in the source, for `InvalidRepeatRange`.
+        span: Ignored<Span>,
     },
     /// `[a]`.
     ///
@@ -269,7 +338,12 @@ pub enum Element {
     /// A quoted string terminal.
     CharVal(CharVal),
     /// A numeric terminal.
-    NumVal(NumVal),
+    NumVal {
+        /// The value.
+        value: NumVal,
+        /// Where it sits in the source, for `InvalidNumericRange`.
+        span: Ignored<Span>,
+    },
     /// `<prose>`: parsed and preserved, never matched or generated (SCOPE.md 6.5).
     ProseVal {
         /// The text between the angle brackets.
@@ -397,6 +471,8 @@ pub enum Node {
         repeat: Repeat,
         /// The repeated node.
         body: NodeId,
+        /// Where the bounds sit in the source.
+        span: Ignored<Span>,
     },
     /// `[a]`, modeled as `a / empty` for coverage purposes.
     Optional {
@@ -413,7 +489,12 @@ pub enum Node {
     /// A quoted string terminal.
     CharVal(CharVal),
     /// A numeric terminal.
-    NumVal(NumVal),
+    NumVal {
+        /// The value.
+        value: NumVal,
+        /// Where it sits in the source.
+        span: Ignored<Span>,
+    },
     /// `<prose>`.
     ProseVal(String),
 }
@@ -547,6 +628,135 @@ mod tests {
         assert!(!Repeat::bounded(5, 2).is_valid());
         assert!(Repeat::bounded(0, 0).is_never());
         assert!(!Repeat::bounded(0, 1).is_never());
+    }
+
+    #[test]
+    fn scalars_are_representable_and_surrogates_are_not() {
+        assert!(NumVal::Scalar(0x41).is_representable());
+        assert!(NumVal::Scalar(0).is_representable());
+        assert!(NumVal::Scalar(0x10_FFFF).is_representable());
+        assert!(
+            !NumVal::Scalar(0x11_0000).is_representable(),
+            "above the last scalar"
+        );
+        assert!(
+            !NumVal::Scalar(0xD800).is_representable(),
+            "a surrogate is not a scalar"
+        );
+        assert!(!NumVal::Scalar(0xDFFF).is_representable());
+        assert!(
+            NumVal::Scalar(0xE000).is_representable(),
+            "just past the surrogates"
+        );
+    }
+
+    #[test]
+    fn a_range_need_only_contain_one_scalar() {
+        assert!(NumVal::Range { lo: 0x41, hi: 0x5A }.is_representable());
+        // Spanning the surrogate block is fine: surrogates simply never match (SCOPE.md 6.1).
+        assert!(
+            NumVal::Range {
+                lo: 0xD7FF,
+                hi: 0xE000
+            }
+            .is_representable()
+        );
+        assert!(
+            NumVal::Range {
+                lo: 0,
+                hi: 0x10_FFFF
+            }
+            .is_representable()
+        );
+        // Wholly inside it, or wholly above the last scalar, and it matches nothing.
+        assert!(
+            !NumVal::Range {
+                lo: 0xD800,
+                hi: 0xDFFF
+            }
+            .is_representable()
+        );
+        assert!(
+            !NumVal::Range {
+                lo: 0xDC00,
+                hi: 0xDD00
+            }
+            .is_representable()
+        );
+        assert!(
+            !NumVal::Range {
+                lo: 0x11_0000,
+                hi: 0x20_0000
+            }
+            .is_representable()
+        );
+    }
+
+    #[test]
+    fn octet_ranges_stay_representable() {
+        // RFC 9110's `obs-text = %x80-FF` and RFC 5322's obs-* rules load and stay usable; the
+        // documented gap is that they mean code points, not bytes (SCOPE.md 3).
+        assert!(NumVal::Range { lo: 0x80, hi: 0xFF }.is_representable());
+        assert!(NumVal::Range { lo: 0, hi: 0xFF }.is_representable());
+    }
+
+    #[test]
+    fn a_concatenation_is_representable_only_if_every_element_is() {
+        assert!(NumVal::Concat(vec![0x41, 0x42, 0x43]).is_representable());
+        assert!(!NumVal::Concat(vec![0x41, 0xD800]).is_representable());
+        assert!(!NumVal::Concat(vec![0x11_0000]).is_representable());
+    }
+
+    #[test]
+    fn counting_scalars_excludes_the_surrogate_block() {
+        assert_eq!(NumVal::scalars_in(0x41, 0x41), 1);
+        assert_eq!(NumVal::scalars_in(0x41, 0x5A), 26);
+        assert_eq!(NumVal::scalars_in(0xD800, 0xDFFF), 0);
+        assert_eq!(
+            NumVal::scalars_in(0xD7FF, 0xE000),
+            2,
+            "the ends, not the 2048 between"
+        );
+        assert_eq!(NumVal::scalars_in(0, 0x10_FFFF), 0x11_0000 - 2048);
+        assert_eq!(
+            NumVal::scalars_in(0x10_FFFF, 0x20_0000),
+            1,
+            "clamped to the last scalar"
+        );
+        assert_eq!(
+            NumVal::scalars_in(5, 4),
+            0,
+            "an inverted range holds nothing"
+        );
+    }
+
+    #[test]
+    fn indexing_a_range_steps_over_the_surrogates() {
+        let at = |lo, hi, i| NumVal::nth_scalar(lo, hi, i).map(u32::from);
+        assert_eq!(at(0x41, 0x5A, 0), Some(0x41));
+        assert_eq!(at(0x41, 0x5A, 25), Some(0x5A));
+        assert_eq!(at(0x41, 0x5A, 26), None, "past the end");
+
+        // The only two scalars in 0xD7FF..=0xE000 are its endpoints.
+        assert_eq!(at(0xD7FF, 0xE000, 0), Some(0xD7FF));
+        assert_eq!(at(0xD7FF, 0xE000, 1), Some(0xE000));
+        assert_eq!(at(0xD7FF, 0xE000, 2), None);
+
+        // A range starting inside the block begins at the first scalar above it.
+        assert_eq!(at(0xDC00, 0xE001, 0), Some(0xE000));
+        assert_eq!(at(0xD800, 0xDFFF, 0), None);
+    }
+
+    #[test]
+    fn every_index_of_a_range_yields_a_distinct_scalar() {
+        // The generator picks uniformly by index, so walk a range that spans the surrogate
+        // block from end to end and check the sequence exactly.
+        let (lo, hi) = (0xD7FD, 0xE002);
+        let count = NumVal::scalars_in(lo, hi);
+        let scalars: Vec<u32> = (0..count)
+            .map(|i| u32::from(NumVal::nth_scalar(lo, hi, i).expect("in range")))
+            .collect();
+        assert_eq!(scalars, [0xD7FD, 0xD7FE, 0xD7FF, 0xE000, 0xE001, 0xE002]);
     }
 
     #[test]
