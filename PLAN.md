@@ -248,7 +248,10 @@ Pipeline:
 
 `ParseError` is a struct-like enum with a `span` on every variant plus a `render(src)` helper
 producing a caret-underlined line — grammar authors are humans, and §3 says this is the one
-place error quality matters.
+place error quality matters. `CheckError` gets the same, with `span()` returning `Option` since
+`LeftRecursion` has no single location: a cycle belongs to several rules at once and pointing at
+any one of them would be arbitrary. Landed in M1.9, where the CLI became the consumer; the
+fixture harness uses it too, rather than keeping its own copy.
 
 ### 3.3 `core_rules.rs`
 
@@ -638,7 +641,7 @@ Nine PRs; this is the bulk of the project.
 | **1.6** | `check.rs` steps 6–7: `nullable`, `min_len`, `witness` (§4.1), with `(min_len, depth)` ordering | unit tests incl. the saturating case (three nested `4294967295` repeats → `Finite(u64::MAX)`), the `a = b / "x"` tie resolving to the terminals, prose non-nullable; the well-foundedness assertion runs on every check in debug builds |
 | **1.7** | `check.rs` steps 8–9: first-graph, left recursion, per-rule reachability; `can_recognize` | direct and indirect left-recursion fixtures fail; no RFC fixture is left-recursive; a `*0(…)` body contributes no edges and hides what it holds; RFC 9110 refuses 25 of 142 start rules for prose and keeps the rest |
 | **1.8** | `lint.rs` + `lint_from` | expected warnings on hand-written cases; RFC 8259 yields exactly one `ShadowsCoreRule`, for `char`, and the core-rules fixture sixteen; no fixture has a dead rule or branch |
-| **1.9** | CLI `check` and `rules` subcommands | manual smoke run over each fixture |
+| **1.9** | CLI `check` and `rules`; `ParseError::render` / `CheckError::render` | `tests/cli.rs` drives the built binary: every valid fixture exits 0 from both subcommands with matching rule counts, every broken one exits 2 with a located error, warnings never change the exit code |
 
 Invalid fixtures needed (`tests/grammars/invalid/`), one file each: undefined rule, duplicate
 definition, `=/` without base, `=/` on a core-rule name without base (D34, `shadows_core: true`),

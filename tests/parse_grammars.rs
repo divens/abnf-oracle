@@ -57,22 +57,6 @@ fn name(path: &Path) -> &str {
     path.file_name().and_then(|n| n.to_str()).unwrap_or("?")
 }
 
-/// Renders a parse failure against its source: "expected an element" on its own is useless for
-/// an 11KB fixture.
-fn locate(src: &str, span: abnf_oracle::Span) -> String {
-    let offset = span.start as usize;
-    let before = &src[..offset.min(src.len())];
-    let line_number = before.lines().count().max(1);
-    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
-    let line = src[line_start..].lines().next().unwrap_or_default();
-    let column = offset - line_start;
-    format!(
-        "line {line_number}, column {}:\n  {line}\n  {}^",
-        column + 1,
-        " ".repeat(column)
-    )
-}
-
 /// A test that silently finds nothing passes, which would be worse than failing.
 #[test]
 fn the_fixture_set_is_present() {
@@ -109,10 +93,10 @@ fn every_fixture_parses() {
         let src = read(&path);
         let grammar = Grammar::parse(&src).unwrap_or_else(|e| {
             panic!(
-                "{} did not parse: {e}
+                "{} did not parse:
 {}",
                 name(&path),
-                locate(&src, e.span())
+                e.render(&src)
             )
         });
         assert!(

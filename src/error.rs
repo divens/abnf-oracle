@@ -81,6 +81,17 @@ impl fmt::Display for ParseError {
     }
 }
 
+impl ParseError {
+    /// Renders the error against the grammar text it came from.
+    ///
+    /// Grammar authors are the ones who fix these, so the location matters more than the
+    /// wording (SCOPE.md 3).
+    #[must_use]
+    pub fn render(&self, src: &str) -> String {
+        render_at(src, self.span(), &self.to_string())
+    }
+}
+
 impl std::error::Error for ParseError {}
 
 /// A structural problem: the grammar cannot be used at all.
@@ -176,6 +187,33 @@ impl fmt::Display for CheckError {
             Self::LeftRecursion { cycle } => {
                 write!(f, "left recursion: {}", cycle.join(" -> "))
             }
+        }
+    }
+}
+
+impl CheckError {
+    /// Where in the source this error is, if it has a single location.
+    ///
+    /// `LeftRecursion` has none: a cycle is a property of several rules at once, and pointing
+    /// at any one of them would be arbitrary.
+    #[must_use]
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            Self::DuplicateDefinition { span, .. }
+            | Self::IncrementalWithoutBase { span, .. }
+            | Self::UndefinedRule { span, .. }
+            | Self::InvalidRepeatRange { span, .. }
+            | Self::InvalidNumericRange { span, .. } => Some(*span),
+            Self::LeftRecursion { .. } => None,
+        }
+    }
+
+    /// Renders the error against the grammar text it came from.
+    #[must_use]
+    pub fn render(&self, src: &str) -> String {
+        match self.span() {
+            Some(span) => render_at(src, span, &self.to_string()),
+            None => self.to_string(),
         }
     }
 }
@@ -363,6 +401,32 @@ impl fmt::Display for GenError {
 }
 
 impl std::error::Error for GenError {}
+
+/// Renders `message` against the source, with a caret under `span`.
+///
+/// Grammar text is ASCII (D35), so byte offsets are column numbers. The exception is
+/// [`ParseError::NonAscii`], whose whole point is a byte that is not — there the column counts
+/// bytes, which is still where the reader should look.
+fn render_at(src: &str, span: Span, message: &str) -> String {
+    let offset = (span.start as usize).min(src.len());
+    let before = &src[..offset];
+    let line_number = before.matches('\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |index| index + 1);
+    // `lines` strips the trailing CR, so CRLF sources do not print a stray carriage return.
+    let line = src[line_start..].lines().next().unwrap_or_default();
+    let column = offset - line_start;
+    // A span can cover a whole definition, line terminator included, so clamp the caret to
+    // what is actually on this line rather than running past its end.
+    let width = (span.end.saturating_sub(span.start) as usize)
+        .min(line.len().saturating_sub(column))
+        .max(1);
+    format!(
+        "line {line_number}, column {}: {message}\n  {line}\n  {}{}",
+        column + 1,
+        " ".repeat(column),
+        "^".repeat(width)
+    )
+}
 
 #[cfg(test)]
 mod tests {
