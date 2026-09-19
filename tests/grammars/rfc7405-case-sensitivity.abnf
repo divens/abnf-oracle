@@ -1,0 +1,18 @@
+; RFC 7405 - Case-Sensitive String Support in ABNF
+; Hand-written from https://www.rfc-editor.org/rfc/rfc7405.txt section 2.1, which
+; gives its examples as competing definitions of one rule name and so cannot be
+; lifted verbatim into a single grammar.
+; Errata applied: none
+;
+; Exists because no RFC grammar in this fixture set uses %s or %i, and D23 requires
+; the canonical self-grammar to recognize text that does.
+
+sensitive      =  %s"aBc"
+
+insensitive    =  %i"aBc"
+
+bare           =  "aBc"
+
+mixed          =  sensitive insensitive bare
+
+both           =  %s"x" / %i"x" / "x"

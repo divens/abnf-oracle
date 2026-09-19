@@ -1,0 +1,8 @@
+; Invalid on purpose: a repetition bound that does not fit in 64 bits.
+; This is valid ABNF - `repeat` is `1*DIGIT` with no bound - and is rejected
+; only by this crate, which stores bounds as u64 (SCOPE.md 6.1, D17). It is the
+; one documented divergence between this parser and the self-grammar.
+; Expected: ParseError::NumberTooLarge
+; Errata applied: none
+
+start          =  1234567890123456789012345"a"

@@ -1,0 +1,7 @@
+; Invalid on purpose: a non-ASCII byte in a comment.
+; RFC 5234 restricts comments to WSP / VCHAR, so this is not valid ABNF at all
+; (SCOPE.md 4.2, D35). This file is deliberately excluded from the ASCII scan.
+; Expected: ParseError::NonAscii
+; Errata applied: none
+
+start          =  "a"  ; naïve

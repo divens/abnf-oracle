@@ -448,6 +448,14 @@ be a breaking change.
 ones. `CheckError` needs `DuplicateDefinition`, `IncrementalWithoutBase { name, shadows_core }`,
 `UndefinedRule`, `InvalidRepeatRange`, `InvalidNumericRange`, `LeftRecursion`.
 
+### 3.9c The self-grammar as an independent check
+
+M2.2 found that SCOPE's `3*3 ["a"]` is not valid ABNF, reasoning from `repetition = [repeat]
+element`. That was one reading of one production. M2.5 settles it without appeal to my reading:
+the canonical self-grammar, extracted mechanically from RFC 5234, **rejects** that text. When a
+question is "what does ABNF permit", running the RFC's own grammar beats arguing from it — and
+after M3's self-generation lands, the same fixture answers in both directions.
+
 ### 3.9b D36 is load-bearing, not a corner case
 
 RFC 3986 defines `path-empty = 0<pchar>` — zero repetitions of a *prose value*, meaning the
@@ -659,7 +667,7 @@ subdirectory.
 | **2.2** | Repetition per §6.3 + `tests/repetition.rs` full table + step-count assertions | all 12 rows pass; large-bound rows assert `steps() <= c*(len+1)` |
 | **2.3** | Hygiene test (D33) | `DIGIT = "x"` + a rule referencing `HEXDIG`: `HEXDIG` matches `7`, the user `DIGIT` matches `x` and not `7`, exactly one `ShadowsCoreRule`, no errors |
 | **2.4** | Corpus harness, JSONTestSuite import, `NOTES.md`, `PROVENANCE.md` | all 95 `y_` accepted and all 174 decodable `n_` rejected — no disagreement with the suite at all; 12 `n_` moved to `indeterminate/` for invalid UTF-8 and 2 for depth, each listed in `NOTES.md` |
-| **2.5** | `tests/self_definition.rs` (D23) | the canonical self-grammar accepts every fixture's CRLF-normalized text |
+| **2.5** | `tests/self_definition.rs` (D23); the two `invalid/parse/` fixtures and an RFC 7405 fixture, both gaps left by M1 | the canonical self-grammar accepts every fixture, including itself and one using `%s`/`%i`; rejects ten negative controls the parser also rejects; and the one documented divergence — a 25-digit repeat, valid ABNF that `u64` refuses — is pinned from both sides |
 | **2.6** | Brute-force enumerator + proptest (§4.3); memo-off equivalence test | property tests green at the default case count |
 | **2.7** | Compatibility limits end to end; CLI `match` with §11 exit codes, incl. invalid UTF-8 → exit 2 (D14) | the prose fixture errors from a reaching start rule and returns `Ok` from a non-reaching one |
 

@@ -11,7 +11,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use abnf_oracle::{CheckError, Grammar, LintWarning, MatchError, ParseOptions};
+use abnf_oracle::{CheckError, Grammar, LintWarning, MatchError, ParseError, ParseOptions};
 
 /// Deliberately broken fixtures live here; other tests assert how they fail.
 const INVALID: &str = "invalid";
@@ -470,5 +470,60 @@ fn naming_the_entry_point_silences_the_unreachable_warning() {
     assert_eq!(
         unreachable, 0,
         "every JSON rule is reachable from JSON-text"
+    );
+}
+
+#[test]
+fn fixtures_under_invalid_parse_fail_at_parse_time() {
+    // These never reach `check`, which is why they live in their own directory: the
+    // ASCII-cleanliness scan has to skip it, and the check-error table must not expect them.
+    let dir = grammars_dir().join(INVALID).join("parse");
+    let expected: &[(&str, Predicate2)] = &[
+        ("number-too-large.abnf", |e| {
+            matches!(e, ParseError::NumberTooLarge { .. })
+        }),
+        ("non-ascii-comment.abnf", |e| {
+            matches!(e, ParseError::NonAscii { .. })
+        }),
+    ];
+
+    for (file, matches_variant) in expected {
+        let src = read(&dir.join(file));
+        let error = Grammar::parse(&src).expect_err("should not parse");
+        assert!(matches_variant(&error), "{file} produced {error}");
+        // And the location is real, not a placeholder at offset zero.
+        assert!(error.span().start > 0, "{file}: {}", error.render(&src));
+    }
+
+    let mut present: Vec<String> = fs::read_dir(&dir)
+        .expect("readable")
+        .filter_map(|entry| {
+            let path = entry.expect("entry").path();
+            (path.extension().and_then(|e| e.to_str()) == Some("abnf"))
+                .then(|| name(&path).to_owned())
+        })
+        .collect();
+    present.sort();
+    let mut named: Vec<String> = expected.iter().map(|(f, _)| (*f).to_owned()).collect();
+    named.sort();
+    assert_eq!(present, named, "a parse fixture has no test");
+}
+
+/// Names the `ParseError` variant a fixture under `invalid/parse/` is there to produce.
+type Predicate2 = fn(&ParseError) -> bool;
+
+#[test]
+fn the_ascii_scan_exclusion_is_narrow() {
+    // `invalid/parse/non-ascii-comment.abnf` is the one file allowed to hold a non-ASCII byte,
+    // and it really does hold one — so the scan's exclusion is load-bearing rather than
+    // vestigial, and narrowing it further would fail (PLAN.md R8).
+    let offender = grammars_dir()
+        .join(INVALID)
+        .join("parse")
+        .join("non-ascii-comment.abnf");
+    let bytes = fs::read(&offender).expect("readable");
+    assert!(
+        bytes.iter().any(|b| *b >= 0x80),
+        "the fixture lost the byte it exists for"
     );
 }
