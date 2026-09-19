@@ -127,21 +127,21 @@ pub struct Grammar {
     opts: ParseOptions,      // provenance; excluded from PartialEq (D21/D30)
 }
 
-pub struct Definition { name: String, kind: DefKind, body: Element, span: Sp }
-pub enum DefKind { Base, Incremental }        // `=` and `=/`
+pub struct Definition { name: RuleName, defined_as: DefinedAs, body: Element, span: Ignored<Span> }
+pub enum DefinedAs { Base, Incremental }      // `=` and `=/`
 
 pub enum Element {                             // recursive tree, no ids
     Alt(Vec<Element>),
     Concat(Vec<Element>),
     Repeat { min: u64, max: Option<u64>, body: Box<Element> },   // None = unbounded
     Optional(Box<Element>),                    // [x]
-    RuleRef { name: String, span: Sp },
-    Str(StringLit),
-    Num(NumVal),
-    Prose { text: String, span: Sp },
+    RuleRef { name: RuleName, span: Ignored<Span> },
+    CharVal(CharVal),
+    NumVal(NumVal),
+    ProseVal { text: String, span: Ignored<Span> },
 }
 
-pub struct StringLit { value: String, case_sensitive: bool }   // %s vs default/%i
+pub struct CharVal { value: String, case_sensitive: bool }     // %s vs default/%i
 pub enum NumVal { Scalar(u64), Range { lo: u64, hi: u64 }, Concat(Vec<u64>) }
 ```
 
@@ -164,6 +164,11 @@ pub struct CheckedGrammar {
 pub enum RuleId { User(u32), Core(u32) }
 ```
 
+Module split: the arena *types* (`NodeId`, `Node`, `Rule`, `RuleId`, `MinLen`, `Witness`) live in
+`ast.rs`, since they are data model; `CheckedGrammar` itself lives in `check.rs`, which is what
+SCOPE §5's module table says produces it. So M0 ships the types and M1.4 ships the struct that
+holds the analyses over them.
+
 Why an arena rather than putting an `id` field on `Element`: §6.7 defines node ids as
 "pre-order traversal of the merged, normalized rule table", which is exactly arena order, so
 the ids come out of the construction for free instead of needing a numbering pass and an
@@ -172,12 +177,20 @@ number, and so does `dist_to_uncovered` (§4.4). The recognizer and generator wa
 rather than chasing `Box`es. The cost is a second element representation; see the `ElemView`
 note below for how to avoid duplicating the printer with it.
 
+**Naming.** Public types take their names from the productions of the ABNF self-grammar
+(RFC 5234 §4) wherever one exists: `CharVal`, `NumVal`, `ProseVal`, `DefinedAs`, `RuleName`,
+`Repeat`, `Element`. That keeps the type list readable to anyone who has read the RFC — which is
+this crate's whole audience — and lines the data model up name-for-name with the
+one-function-per-production parser (§3.2), so the D35 invariant can be audited by reading the two
+side by side. Where no production exists, the name says what the thing does: `Ignored`, `MinLen`,
+`Witness`, `NodeId`.
+
 Three details that are easy to get wrong:
 
 - **Spans must not participate in `PartialEq`.** M1 requires `*1a` and `[a]` to parse to *equal*
   grammars, and those have different spans. SCOPE.md does not say this because it is an
   implementation concern, but it is load-bearing for every round-trip test. Wrap spans in a
-  newtype whose `PartialEq` is unconditionally `true` (`struct Sp(Span);`) so the rest can be
+  newtype whose `PartialEq` is unconditionally `true` (`struct Ignored<T>(T);`) so the rest can be
   derived — otherwise every `PartialEq` is hand-written and one missed field silently breaks a
   round-trip test.
 - **Rule names compare ASCII-case-insensitively.** Names are case-insensitive everywhere else
@@ -541,8 +554,8 @@ current one's tests pass (SCOPE §8).
 | PR | Contents | Done when |
 |---|---|---|
 | **0.1** | `Cargo.toml` (edition 2024, `cli` feature opt-in, `proptest` dev-dep), `src/lib.rs` with crate lints, empty modules, `src/bin/abnf-oracle.rs` stub, `.gitattributes`, `LICENSE` (MIT/Apache-2.0 dual), `README.md` stub, `tests/` + `tests/grammars/` + `tests/corpus/` layout | `cargo build` and `cargo build --features cli` |
-| **0.2** | `.github/workflows/ci.yml`: `fmt --check`, `clippy -- -D warnings`, `test`, each × {default, `--features cli`}; `rust-toolchain.toml` pinning stable | CI green on the empty crate |
-| **0.3** | `ast.rs` both layers per §3.1 (incl. the span newtype and `ElemView`); `error.rs` enum skeletons; `rng.rs` + committed test vectors | `cargo test` passes |
+| **0.2** | `.github/workflows/ci.yml`: `fmt --check`, `clippy -- -D warnings`, `test`, each × {default, `--features cli`}, plus `cargo doc` under `RUSTDOCFLAGS=-D warnings` — the only check that catches a broken intra-doc link; `rust-toolchain.toml` pinning stable | CI green on the empty crate |
+| **0.3** | `ast.rs` both layers per §3.1 (incl. the span newtype; `ElemView` lands in 1.2 with the printer that uses it); `error.rs` enum skeletons; `rng.rs` + committed test vectors | `cargo test` passes |
 
 `.gitattributes` matters more than it looks on a Windows checkout: `*.abnf text eol=lf`,
 `tests/corpus/** -text` (corpus files are raw bytes, §9), `*.rs text eol=lf`.
@@ -645,6 +658,15 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 
 CLI (~300 lines) and tests are excluded from the budget per §15. Roughly 70 lines of headroom;
 `ElemView` is what keeps it positive.
+
+**Actuals** (update as modules land). After M0, with `ast.rs`, `error.rs` and `rng.rs`
+essentially complete: 946 non-test lines, of which 561 are code and 385 are doc comments.
+`ast.rs` is 483 against 300 budgeted and `error.rs` 366 against 300 — the overage is almost
+entirely the doc comment per public field and variant that `#![deny(missing_docs)]` requires of
+a data model this wide. Two readings of §15 are available and they disagree: counting every
+non-test line puts the crate on course to strain 3,500, while counting code lines only leaves it
+comfortable. Worth settling the measuring convention at M1, with real data from `parse.rs` and
+`check.rs`, rather than trimming documentation to hit a number.
 
 ---
 

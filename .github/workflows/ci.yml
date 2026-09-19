@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt, clippy, docs, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel and pulls in clippy and rustfmt,
+      # so the first cargo invocation installs everything this job needs.
+      - name: Toolchain
+        run: cargo --version --verbose && rustc --version && cargo clippy --version
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      # Both feature configurations, because `cli` is opt-in and the library
+      # target must keep building without it (SCOPE.md 10, D13).
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy (cli)
+        run: cargo clippy --all-targets --features cli -- -D warnings
+
+      # The only check that catches a broken intra-doc link. Nothing else here
+      # runs rustdoc, and `deny(missing_docs)` does not imply the links resolve.
+      - name: Docs
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --all-features
+
+      - name: Test (default features)
+        run: cargo test
+
+      - name: Test (cli)
+        run: cargo test --features cli
