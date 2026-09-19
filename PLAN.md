@@ -429,6 +429,22 @@ be a breaking change.
 ones. `CheckError` needs `DuplicateDefinition`, `IncrementalWithoutBase { name, shadows_core }`,
 `UndefinedRule`, `InvalidRepeatRange`, `InvalidNumericRange`, `LeftRecursion`.
 
+### 3.9a Fixtures are derived, not typed
+
+`scripts/extract-fixtures.py` builds every `tests/grammars/*.abnf` from the RFC plain text.
+Three things in that format defeat naive extraction, each found by a failing test rather than
+by inspection:
+
+- **A page break can fall mid-rule.** RFC 5322 splits `obs-zone` across one. Removing only the
+  footer, form feed and running header leaves a gap that reads as the end of a block, silently
+  truncating the rule — so the blank lines around the boundary go too.
+- **Indentation is not consistent within a document.** RFC 8259 prints its grammar at one
+  indent in §2 and another later, so each block is dedented by its own base. Getting this wrong
+  does not raise an error: a rule left at the wrong indent parses as a *continuation* of the
+  rule above it, quietly merging two rules into one.
+- **Prose can look like a continuation.** RFC 3339's NOTE paragraphs are indented deeper than
+  the grammar they follow, so a blank line has to end a block unless a sibling rule follows.
+
 ### 3.10 `display.rs` — canonical form for both layers
 
 Not in SCOPE §5's file list; it is here because `ast.rs` is already the widest file in the crate
@@ -583,7 +599,7 @@ Nine PRs; this is the bulk of the project.
 |---|---|---|
 | **1.1** | `parse.rs`: ASCII gate, scanner-level line endings, `strict_crlf`, all productions (§3.2 steps 1–6) | unit tests for every §4 construct parse to the expected AST; `NonAscii` and `ExpectedCrlf` fire where expected |
 | **1.2** | Local rewrites (§3.2 step 7); `Display` + `PartialEq` for the **syntactic** layer | `Grammar::parse(g.to_string()) == g`; `*1a` ≡ `[a]`; canonical spelling unit-tested against the §6.7 table row by row |
-| **1.3** | `core_rules.rs` + fixture transcription: core rules, 3 self-definition variants, RFC 8259, 3986, 5322 §3, 3339, 9110 subset; header comment per file naming RFC/section/errata; `tests/parse_grammars.rs`; the ASCII-cleanliness scan | every fixture parses; the scan passes |
+| **1.3** | `core_rules.rs` + `scripts/extract-fixtures.py` deriving all nine fixtures from RFC text; `tests/parse_grammars.rs`; the ASCII-cleanliness scan | every fixture parses and round-trips, under both line-ending settings; the scan passes |
 | **1.4** | `check.rs` steps 1–3: rule-table build, lowering + node ids, hygienic resolution; `Display` + `PartialEq` for `CheckedGrammar` | `Grammar::parse(cg.to_string()).check() == cg`; duplicate / orphan `=/` / `shadows_core` fixtures fail with the right variant; two textually different grammars with one canonical form get identical node ids |
 | **1.5** | `check.rs` steps 4–5: range validation, representability | `5*2"a"` and `%x5A-41` fixtures fail; a surrogate-spanning range is representable, `%xD800-DFFF` is not |
 | **1.6** | `check.rs` steps 6–7: `nullable`, `min_len`, `witness` (§4.1) | unit tests incl. the saturating case (three nested `4294967295` repeats → `Finite(u64::MAX)`), the `a = b / "x"` tie, prose non-nullable |
@@ -645,7 +661,7 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 | R1 | **Stack overflow in `recognize` on deeply nested input.** JSONTestSuite ships `n_structures_100000_opening_arrays.json` and friends; recursion depth there is ~input length. | Run corpus tests on a thread with an explicit 64 MB stack (`std::thread::Builder::stack_size`). If it still blows, classify those specific cases in `NOTES.md` as depth-limited and document the limit. Decide in PR 2.4, not later. |
 | R2 | **Rule 2 implemented as "any branch that reaches an uncovered unit" rather than `argmin dist`.** It is the natural simplification, it passes the JSON coverage test, and it is wrong — D38's termination argument needs the strictly decreasing measure. | The chase test is the guard: rev 5.2 records that the naive version fails it with `OutputLimit`. Keep the debug assertion of R10 as the second line of defence, and do not relax the chase fixture to something shallower. |
 | R3 | Witness cycles from a round-robin `min_len` fixpoint. | Knuth worklist (§4.1), plus a debug assertion that following witnesses from any productive node terminates within `nodes.len()` steps. |
-| R4 | Fixture transcription errors across seven RFC grammars, by hand. | Header comment naming RFC + section + errata; a test asserting each fixture checks clean; cross-check against `abnfgen` / go-abnf in M4. Transcribe from RFC text, never from memory or third-party copies. |
+| R4 | ~~Fixture transcription errors across seven RFC grammars, by hand.~~ **Retired in M1.3: nothing was transcribed by hand.** | `scripts/extract-fixtures.py` derives all nine fixtures from the RFC texts and is verified to reproduce them byte for byte. Three independent checks passed: every content line appears verbatim in its source RFC, no fixture has an undefined rule reference, and the two derived fixtures differ from their base by exactly the errata substitutions and the RFC 7405 splice. The M4 cross-check against `abnfgen` / go-abnf still stands. |
 | R5 | Git line-ending mangling on Windows silently changing corpus bytes. | `.gitattributes` in PR 0.1, plus a test reading one known corpus file and asserting its exact byte length. |
 | R6 | ~~Errata 2968 / 3076 wording taken from memory rather than the errata page.~~ **Fired, and was caught in M1.1.** SCOPE rev 5.2 had the two errata's subjects transposed and treated 3076 as a numeric-value clarification, which would have left `rulelist` ambiguous in the canonical fixture. | Fixed in SCOPE rev 5.3 / D39. The mitigation stands for PR 1.3: paste the corrected productions into each fixture header, from the errata page, never from memory. |
 | R7 | **Line-budget pressure** (~3,500 lines, §15). The two-layer split added a representation and a lowering pass; D38 added the generatable graph and the BFS; M1.2 added `display.rs`. | One printer for both layers (§3.10); check at each milestone with `tokei`. If it overruns, the honest first cut is terser `Display` impls in `error.rs`, not a required behaviour. |
