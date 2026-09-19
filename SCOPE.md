@@ -1,10 +1,10 @@
-# Scoping document: `abnf-oracle` (revision 5.4)
+# Scoping document: `abnf-oracle` (revision 5.5)
 
 A small, correct, dependency-light Rust crate that parses ABNF grammars (RFC 5234, RFC 7405), recognizes whether an input matches a rule, and generates random inputs that match a rule. Built to be a **testing oracle**, not a production parser.
 
 Working crate name: `abnf-oracle` (rename freely; `abnf` on crates.io is taken by an unmaintained crate with a different scope).
 
-Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar; 5.4 completes §6.7's parenthesization rule, which covered two of the four cases that need parentheses. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
+Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar; 5.4 completes §6.7's parenthesization rule, which covered two of the four cases that need parentheses; 5.5 corrects the claim that RFC 3986 and RFC 9110 restate the core rules, which neither does. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
 
 ---
 
@@ -83,11 +83,11 @@ Line endings: grammar text is normalized (`CRLF`, `LF`, `CR` → `LF`) before pa
 | `foo = a` then `foo = b` | **Structural error**: duplicate definition |
 | `foo =/ b` with no prior `foo =` | **Structural error**: incremental definition without base |
 | Several `foo =/ …` lines after one `foo =` | Valid; appended in order |
-| Grammar defines a core-rule name (`DIGIT = …`) | Valid; the explicit definition **shadows** the implicit core rule. Lint warning `ShadowsCoreRule` (RFC 3986 and RFC 9110 restate core rules verbatim, so this must not be an error) |
+| Grammar defines a core-rule name (`DIGIT = …`) | Valid; the explicit definition **shadows** the implicit core rule. Lint warning `ShadowsCoreRule`, never an error — RFC 8259 defines `char`, which shadows the core rule `CHAR`, so treating this as an error would reject the JSON grammar outright |
 | Grammar defines a core-rule name twice explicitly | Structural error, as for any duplicate |
 | `DIGIT =/ "x"` with no explicit `DIGIT =` | **Structural error** `IncrementalWithoutBase { name, shadows_core: true }`; its `Display` suggests `DIGIT = <core definition> / "x"`. Extending an implicit rule has no coherent meaning under hygienic resolution (below) |
 
-**Hygienic core rules.** Rule references *inside core-rule bodies* always resolve within the core environment; user shadowing affects only references written in the user grammar. So `DIGIT = "x"` changes what a user reference to `DIGIT` means, but core `HEXDIG` (defined as `DIGIT / "A" / … / "F"`) still matches `7`. The leaky alternative would let a lint-warned convenience silently redefine `HEXDIG`, `LWSP` and everything downstream. Under hygiene, RFC 3986's and RFC 9110's verbatim restatements are exact no-ops, which is the intended outcome. User references resolve user-first, then core.
+**Hygienic core rules.** Rule references *inside core-rule bodies* always resolve within the core environment; user shadowing affects only references written in the user grammar. So `DIGIT = "x"` changes what a user reference to `DIGIT` means, but core `HEXDIG` (defined as `DIGIT / "A" / … / "F"`) still matches `7`. The leaky alternative would let a lint-warned convenience silently redefine `HEXDIG`, `LWSP` and everything downstream. Under hygiene, a grammar that happens to reuse a core rule name for something unrelated — RFC 8259's `char` is `unescaped / escape (…)`, nothing like `CHAR = %x01-7F` — changes only its own references, which is the intended outcome. User references resolve user-first, then core.
 
 The internal model is therefore two layers (§6.7): a **syntactic** `Grammar` — the ordered list of definitions exactly as written, each `name = …` or `name =/ …` — and a **semantic** `CheckedGrammar` — the merged rule table produced by `check()`, resolved against the fixed **core-rule environment**. Duplicate definitions and `=/` without base are detected while building the rule table, so they are `CheckError`s, not `ParseError`s, and a `Grammar` never carries hidden validity state. `Display` at either layer serializes the user grammar only.
 
@@ -393,11 +393,11 @@ Each milestone is a PR-sized unit. Do not start the next before the current one'
 **M0 — Skeleton.** Crate compiles with `#![forbid(unsafe_code)]`; CI runs `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`, once with default features and once with `--features cli`. `ast.rs` has the full data model including node ids. Test directory layout from §5 exists.
 
 **M1 — Grammar parser and check.**
-- Parses every `.abnf` in `tests/grammars/`: RFC 5234 Appendix B core rules; the ABNF self-definition in three variants — RFC 5234 §4 as published, RFC 5234 §4 with both verified errata applied, and the **canonical self-grammar** (RFC 5234 §4 + Errata 2968 and 3076 + the RFC 7405 §2.2 `char-val` amendments), which is the one M2 uses; RFC 8259 JSON; RFC 3986 URI; RFC 5322 §3 address grammar; RFC 3339 date-time; RFC 9110 selected header field grammars (exercises core-rule shadowing and `obs-text`).
+- Parses every `.abnf` in `tests/grammars/`: RFC 5234 Appendix B core rules; the ABNF self-definition in three variants — RFC 5234 §4 as published, RFC 5234 §4 with both verified errata applied, and the **canonical self-grammar** (RFC 5234 §4 + Errata 2968 and 3076 + the RFC 7405 §2.2 `char-val` amendments), which is the one M2 uses; RFC 8259 JSON; RFC 3986 URI; RFC 5322 §3 address grammar; RFC 3339 date-time; RFC 9110 Appendix A collected ABNF (exercises `obs-text = %x80-FF` and prose values: its URI rules are `<…>` references into RFC 3986).
 - Every fixture passes `check()` except deliberately broken fixtures under `tests/grammars/invalid/` (undefined rule, duplicate, `=/` without base, `=/` on an implicit core rule with `shadows_core: true`, direct and indirect left recursion, `min > max` repeat, descending numeric range), each of which must fail with the expected `CheckError` variant. A fixture with a 25-digit repeat count fails to *parse* with `NumberTooLarge`; a fixture with a non-ASCII byte in a comment fails to parse with `NonAscii`.
 - A test scans every file under `tests/grammars/` and fails on any non-ASCII byte (§4.2).
 - Round-trip at both layers: `Grammar::parse(g.to_string()) == g` and `Grammar::parse(cg.to_string()).check() == cg` for every valid fixture, including fixtures parsed with `strict_crlf = true`. `*1a` and `[a]` parse to equal grammars. Canonical spelling is unit-tested against the §6.7 table.
-- `lint()` and `lint_from()` produce the expected warnings on hand-written cases, including `UnproductiveRule` and `UnproductiveAlternative`; the RFC 9110 fixture yields `ShadowsCoreRule` warnings and no errors.
+- `lint()` and `lint_from()` produce the expected warnings on hand-written cases, including `UnproductiveRule` and `UnproductiveAlternative`; the RFC 8259 fixture yields exactly one `ShadowsCoreRule` warning, for `char` against the core rule `CHAR`, and no errors; the core-rules fixture yields sixteen and no errors.
 - Analyses (nullable, `min_len` and `witness` per node; `reaches_prose` and `reaches_unrepresentable` per rule) are unit-tested on hand-written grammars, including: a `min_len` that saturates (three nested `4294967295` repetitions) and is still `Finite`; a prose-containing rule that does *not* trigger left recursion or `UnproductiveAlternative`; and the tie case `a = b / "x"`, `b = a / "y"`, whose witnesses point at the terminals.
 - Node ids: two textually different grammars with the same canonical form yield identical node ids.
 - Acceptance is about parsing and checking only. Nothing in M1 recognizes input.
@@ -481,7 +481,7 @@ Exit codes for `match`:
 
 ## 13. Decisions before M1 (normative)
 
-Each item traces to the review that motivated it (D1–D16 first review, D17–D24 second, D25–D31 third, D32–D37 implementation-planning questions, D38 implementation follow-up, D39 an errata misreading caught during M1.1). Implement these as written.
+Each item traces to the review that motivated it (D1–D16 first review, D17–D24 second, D25–D31 third, D32–D37 implementation-planning questions, D38 implementation follow-up, D39 and D40 factual corrections caught while building the fixtures). Implement these as written.
 
 - **D1** A `Recognizer` or `Generator` can only be constructed from a `CheckedGrammar`. `Grammar::check` consumes the `Grammar`. There is no unchecked path.
 - **D2** A `Recognizer` is bound to one input at construction. The memo table lives inside it and is never reused across inputs.
@@ -522,6 +522,7 @@ Each item traces to the review that motivated it (D1–D16 first review, D17–D
 - **D37** Canonical spelling follows the table in §6.7: even-padded uppercase `%x`, bare case-insensitive strings, `%s` for case-sensitive, and the stated parenthesization rules.
 - **D38** The coverage guarantee is independent of `max_depth`. In coverage mode, witness mode engages only when `dist_to_uncovered` is `∞` at the current node; while it is finite the walk chases by strictly decreasing distance (ties by branch index), so the chase is bounded and deterministic. `max_steps` / `max_output_len` remain the hard backstops.
 - **D39** RFC 5234 has two verified errata and both are §4 grammar corrections: 2968 fixes `elements`, 3076 fixes `rulelist`. Revisions before 5.3 described 3076 as clarifying numeric-value concatenation, which it does not — that is base RFC 5234 §2.3 — and attributed the `rulelist` fix to 2968. The canonical self-grammar is RFC 5234 §4 + **both** errata + RFC 7405 §2.2; the parser implements both corrections.
+- **D40** No fixture RFC restates the core rules: RFC 9110 §5 includes them "by reference", and RFC 3986 defines none. Revisions before 5.5 justified `ShadowsCoreRule` by a verbatim restatement in those two documents, which does not exist. The decision is unchanged and the evidence is stronger: RFC 8259 defines `char`, unrelated to `CHAR = %x01-7F`, so shadowing must stay a lint or the JSON grammar would not check.
 
 ## 14. v2 candidates (explicitly not v1)
 
