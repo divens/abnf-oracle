@@ -1,10 +1,10 @@
-# Scoping document: `abnf-oracle` (revision 5.2)
+# Scoping document: `abnf-oracle` (revision 5.3)
 
 A small, correct, dependency-light Rust crate that parses ABNF grammars (RFC 5234, RFC 7405), recognizes whether an input matches a rule, and generates random inputs that match a rule. Built to be a **testing oracle**, not a production parser.
 
 Working crate name: `abnf-oracle` (rename freely; `abnf` on crates.io is taken by an unmaintained crate with a different scope).
 
-Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
+Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
 
 ---
 
@@ -55,16 +55,20 @@ Everything in RFC 5234 §2–§4 and Appendix B, plus RFC 7405.
 | Quoted string, explicit case-insensitive | `%i"abc"` | RFC 7405 |
 | Numeric value | `%x41`, `%d65`, `%b1000001` | Representability: §6.1 |
 | Numeric range | `%x41-5A` | Representability: §6.1; descending ranges are a structural error |
-| Numeric concatenation | `%x41.42.43` | Erratum 3076 |
+| Numeric concatenation | `%x41.42.43` | RFC 5234 §2.3; no erratum involved |
 | Prose value | `<some description>` | Parsed; not matchable or generatable (§6.5). Content restricted to `%x20-3D / %x3F-7E` exactly as RFC 5234 |
 | Comments | `; text` to end of line | Content restricted to `WSP / VCHAR` (ASCII) exactly as RFC 5234; non-ASCII is a `ParseError` (§4.2) |
 | Line continuation | Continuation lines begin with whitespace | |
 | Core rules | `ALPHA`, `DIGIT`, `CRLF`, `WSP`, … | Appendix B, always implicit in v1 (not configurable); see §4.1 |
 
-Errata:
+Errata. RFC 5234 has exactly two verified errata, and both correct the ABNF-of-ABNF in §4 — each removing an ambiguity in it that the other does not:
 
-- **2968** fixes an ambiguity in RFC 5234's own grammar for ABNF (the `rulelist` whitespace/comment handling). The grammar-text parser implements the corrected form. Both the corrected and uncorrected self-definitions are kept as fixtures (§8).
-- **3076** clarifies §3.7 concatenation of numeric values. Applied as written.
+- **2968** `elements = alternation *c-wsp` becomes `elements = alternation *WSP`.
+- **3076** `rulelist = 1*( rule / (*c-wsp c-nl) )` becomes `rulelist = 1*( rule / (*WSP c-nl) )`.
+
+Neither changes the language that grammar describes, only how many ways a given input can be derived; but a deterministic parser has to be shaped around them, so the grammar-text parser implements both. Both the corrected and uncorrected self-definitions are kept as fixtures (§8).
+
+Numeric concatenation (`%d13.10`) needs no erratum: it is described in RFC 5234 §2.3 and appears in the `bin-val` / `dec-val` / `hex-val` productions as published.
 
 Line endings: grammar text is normalized (`CRLF`, `LF`, `CR` → `LF`) before parsing unless `ParseOptions::strict_crlf` is set, in which case only `CRLF` is accepted.
 
@@ -89,7 +93,7 @@ The internal model is therefore two layers (§6.7): a **syntactic** `Grammar` �
 
 ### 4.2 Parser strictness
 
-The hand-written parser accepts exactly the language of the canonical self-grammar (RFC 5234 §4 + Erratum 2968 + RFC 7405 §2.2), **modulo line-ending normalization**: the self-grammar demands CRLF, while this parser normalizes LF and CR to CRLF-equivalent before parsing unless `strict_crlf` is set. Apart from that one deliberate leniency there is none — comments and prose values are ASCII-only as the RFC specifies, and a non-ASCII byte anywhere in grammar text is `ParseError::NonAscii { span }`. This invariant is what makes M2's self-recognition test and M3's self-generation test meaningful in both directions; a lenient parser would make them vacuous. Consequence: every fixture under `tests/grammars/` must be ASCII-clean, enforced by a test that scans them. A `ParseOptions::lenient_comments` syntactic option may be added later if real grammars need UTF-8 comments; it would not affect the default path.
+The hand-written parser accepts exactly the language of the canonical self-grammar (RFC 5234 §4 + Errata 2968 and 3076 + RFC 7405 §2.2), **modulo line-ending normalization**: the self-grammar demands CRLF, while this parser normalizes LF and CR to CRLF-equivalent before parsing unless `strict_crlf` is set. Apart from that one deliberate leniency there is none — comments and prose values are ASCII-only as the RFC specifies, and a non-ASCII byte anywhere in grammar text is `ParseError::NonAscii { span }`. This invariant is what makes M2's self-recognition test and M3's self-generation test meaningful in both directions; a lenient parser would make them vacuous. Consequence: every fixture under `tests/grammars/` must be ASCII-clean, enforced by a test that scans them. A `ParseOptions::lenient_comments` syntactic option may be added later if real grammars need UTF-8 comments; it would not affect the default path.
 
 ## 5. Architecture
 
@@ -380,7 +384,7 @@ Each milestone is a PR-sized unit. Do not start the next before the current one'
 **M0 — Skeleton.** Crate compiles with `#![forbid(unsafe_code)]`; CI runs `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt --check`, once with default features and once with `--features cli`. `ast.rs` has the full data model including node ids. Test directory layout from §5 exists.
 
 **M1 — Grammar parser and check.**
-- Parses every `.abnf` in `tests/grammars/`: RFC 5234 Appendix B core rules; the ABNF self-definition in three variants — RFC 5234 §4 as published, RFC 5234 §4 with Erratum 2968, and the **canonical self-grammar** (RFC 5234 §4 + Erratum 2968 + the RFC 7405 §2.2 `char-val` amendments), which is the one M2 uses; RFC 8259 JSON; RFC 3986 URI; RFC 5322 §3 address grammar; RFC 3339 date-time; RFC 9110 selected header field grammars (exercises core-rule shadowing and `obs-text`).
+- Parses every `.abnf` in `tests/grammars/`: RFC 5234 Appendix B core rules; the ABNF self-definition in three variants — RFC 5234 §4 as published, RFC 5234 §4 with both verified errata applied, and the **canonical self-grammar** (RFC 5234 §4 + Errata 2968 and 3076 + the RFC 7405 §2.2 `char-val` amendments), which is the one M2 uses; RFC 8259 JSON; RFC 3986 URI; RFC 5322 §3 address grammar; RFC 3339 date-time; RFC 9110 selected header field grammars (exercises core-rule shadowing and `obs-text`).
 - Every fixture passes `check()` except deliberately broken fixtures under `tests/grammars/invalid/` (undefined rule, duplicate, `=/` without base, `=/` on an implicit core rule with `shadows_core: true`, direct and indirect left recursion, `min > max` repeat, descending numeric range), each of which must fail with the expected `CheckError` variant. A fixture with a 25-digit repeat count fails to *parse* with `NumberTooLarge`; a fixture with a non-ASCII byte in a comment fails to parse with `NonAscii`.
 - A test scans every file under `tests/grammars/` and fails on any non-ASCII byte (§4.2).
 - Round-trip at both layers: `Grammar::parse(g.to_string()) == g` and `Grammar::parse(cg.to_string()).check() == cg` for every valid fixture, including fixtures parsed with `strict_crlf = true`. `*1a` and `[a]` parse to equal grammars. Canonical spelling is unit-tested against the §6.7 table.
@@ -393,7 +397,7 @@ Each milestone is a PR-sized unit. Do not start the next before the current one'
 - Set-of-positions implementation per §6.2–§6.3, with memoization and the in-progress guard.
 - `tests/repetition.rs` passes every case in the §6.3 table, plus the brute-force property test. For the large-bound cases the test asserts `recognizer.steps() <= c * (input_len + 1)` for a fixed small `c`, which checks the O(input) property directly; a generous timeout remains only as a hang guard, never as the assertion.
 - `tests/corpus/rfc8259/` populated from JSONTestSuite: every `y_*` accepted, every `n_*` rejected, `i_*` recorded not asserted. Any `n_` case that pure ABNF accepts (encoding-level rejections are outside the grammar) is moved to `i_` and listed in `tests/corpus/rfc8259/NOTES.md`.
-- `self_definition.rs`: the recognizer, running the **canonical self-grammar** (RFC 5234 + Erratum 2968 + RFC 7405), accepts the CRLF-normalized text of every valid fixture in `tests/grammars/`, including fixtures that use `%s`/`%i` strings. The test normalizes line endings itself so results do not depend on Git checkout settings.
+- `self_definition.rs`: the recognizer, running the **canonical self-grammar** (RFC 5234 + Errata 2968 and 3076 + RFC 7405), accepts the CRLF-normalized text of every valid fixture in `tests/grammars/`, including fixtures that use `%s`/`%i` strings. The test normalizes line endings itself so results do not depend on Git checkout settings.
 - Compatibility limits: a fixture with a prose value yields `ProseValueReachable` from a start rule that reaches it, and `Ok` from one that does not.
 - Hand-written unit tests for every construct in §4, including `=/`, `%s` vs `%i`, nested optionals, and core-rule shadowing.
 - Hygiene: with `DIGIT = "x"` and a user rule referencing `HEXDIG`, `HEXDIG` still matches `7` and a user reference to `DIGIT` matches `x` and not `7`; exactly one `ShadowsCoreRule` warning, no errors.
@@ -468,7 +472,7 @@ Exit codes for `match`:
 
 ## 13. Decisions before M1 (normative)
 
-Each item traces to the review that motivated it (D1–D16 first review, D17–D24 second, D25–D31 third, D32–D37 implementation-planning questions, D38 implementation follow-up). Implement these as written.
+Each item traces to the review that motivated it (D1–D16 first review, D17–D24 second, D25–D31 third, D32–D37 implementation-planning questions, D38 implementation follow-up, D39 an errata misreading caught during M1.1). Implement these as written.
 
 - **D1** A `Recognizer` or `Generator` can only be constructed from a `CheckedGrammar`. `Grammar::check` consumes the `Grammar`. There is no unchecked path.
 - **D2** A `Recognizer` is bound to one input at construction. The memo table lives inside it and is never reused across inputs.
@@ -492,7 +496,7 @@ Each item traces to the review that motivated it (D1–D16 first review, D17–D
 - **D20** The generator never enters a branch with infinite `min_len`, in any mode. Coverage units exclude such branches and everything nested inside them. `UnproductiveAlternative` is a lint.
 - **D21** `PartialEq` ignores parse options; they are provenance. Round-trip holds for any options.
 - **D22** Node ids are internal, excluded from `PartialEq`, and assigned in `check()` by pre-order traversal of the merged rule table (superseded in detail by D32).
-- **D23** The self-recognition fixture is the canonical self-grammar: RFC 5234 §4 + Erratum 2968 + RFC 7405 §2.2. It must recognize every fixture, including those using `%s`/`%i`.
+- **D23** The self-recognition fixture is the canonical self-grammar: RFC 5234 §4 + Errata 2968 and 3076 + RFC 7405 §2.2. It must recognize every fixture, including those using `%s`/`%i`.
 - **D24** M4 is non-blocking during implementation and required before the 1.0 release. No complexity guarantee is claimed for the recognizer; `max_steps` is the resource bound.
 - **D25** In coverage mode, a repetition whose body can reach an uncovered unit and whose `max >= 1` uses a count of at least `max(min, 1)`. Units inside a `max == 0` repetition are not coverage units.
 - **D26** For analyses, prose is assumed non-nullable with `min_len = 1`. Prose never creates a first-graph edge and never triggers unproductive lints.
@@ -504,10 +508,11 @@ Each item traces to the review that motivated it (D1–D16 first review, D17–D
 - **D32** `Grammar` is syntactic (ordered definitions, local rewrites only); `CheckedGrammar` is semantic (merged, resolved, id-assigned). `=/` merging happens in `check()`, so duplicate definition and `=/`-without-base are `CheckError`s and a `Grammar` never carries hidden validity state. Each layer has its own `Display`, `PartialEq` and round-trip (§6.7).
 - **D33** Core-rule resolution is hygienic: references inside core bodies resolve within the core environment; user shadowing affects only user references.
 - **D34** `=/` on a core-rule name with no explicit base is `IncrementalWithoutBase { shadows_core: true }`, whose message suggests the `NAME = <core> / extra` workaround.
-- **D35** The parser is strict per RFC 5234 for comments and prose values: both are ASCII-only. Any non-ASCII byte anywhere in grammar text is `ParseError::NonAscii`, checked before tokenization; comments and prose are simply the only positions where a non-ASCII byte could otherwise have been mistaken for valid content. Subject only to the documented line-ending normalization (§4.2) and the `u64` numeric-magnitude restriction in §6.1 / D17, the hand-written parser accepts exactly the language of the canonical self-grammar (RFC 5234 §4 + Erratum 2968 + RFC 7405 §2.2). Fixtures are required to be ASCII-clean and are checked accordingly. M3 verifies the reverse direction by generating from the canonical self-grammar and requiring every generated grammar to parse successfully.
+- **D35** The parser is strict per RFC 5234 for comments and prose values: both are ASCII-only. Any non-ASCII byte anywhere in grammar text is `ParseError::NonAscii`, checked before tokenization; comments and prose are simply the only positions where a non-ASCII byte could otherwise have been mistaken for valid content. Subject only to the documented line-ending normalization (§4.2) and the `u64` numeric-magnitude restriction in §6.1 / D17, the hand-written parser accepts exactly the language of the canonical self-grammar (RFC 5234 §4 + Errata 2968 and 3076 + RFC 7405 §2.2). Fixtures are required to be ASCII-clean and are checked accordingly. M3 verifies the reverse direction by generating from the canonical self-grammar and requiring every generated grammar to parse successfully.
 - **D36** `max == 0` repetition bodies contribute no first-graph edges and are excluded from `reaches_prose` / `reaches_unrepresentable`.
 - **D37** Canonical spelling follows the table in §6.7: even-padded uppercase `%x`, bare case-insensitive strings, `%s` for case-sensitive, and the stated parenthesization rules.
 - **D38** The coverage guarantee is independent of `max_depth`. In coverage mode, witness mode engages only when `dist_to_uncovered` is `∞` at the current node; while it is finite the walk chases by strictly decreasing distance (ties by branch index), so the chase is bounded and deterministic. `max_steps` / `max_output_len` remain the hard backstops.
+- **D39** RFC 5234 has two verified errata and both are §4 grammar corrections: 2968 fixes `elements`, 3076 fixes `rulelist`. Revisions before 5.3 described 3076 as clarifying numeric-value concatenation, which it does not — that is base RFC 5234 §2.3 — and attributed the `rulelist` fix to 2968. The canonical self-grammar is RFC 5234 §4 + **both** errata + RFC 7405 §2.2; the parser implements both corrections.
 
 ## 14. v2 candidates (explicitly not v1)
 
