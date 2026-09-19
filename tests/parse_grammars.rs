@@ -11,7 +11,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use abnf_oracle::{CheckError, Grammar, ParseOptions};
+use abnf_oracle::{CheckError, Grammar, MatchError, ParseOptions};
 
 /// Deliberately broken fixtures live here; other tests assert how they fail.
 const INVALID: &str = "invalid";
@@ -301,6 +301,12 @@ fn broken_fixtures_fail_the_way_they_say_they_do() {
         ("invalid-repeat-range.abnf", |e| {
             matches!(e, CheckError::InvalidRepeatRange { min: 5, max: 2, .. })
         }),
+        ("left-recursion-direct.abnf", |e| {
+            matches!(e, CheckError::LeftRecursion { .. })
+        }),
+        ("left-recursion-indirect.abnf", |e| {
+            matches!(e, CheckError::LeftRecursion { .. })
+        }),
         ("invalid-numeric-range.abnf", |e| {
             matches!(
                 e,
@@ -337,4 +343,79 @@ fn broken_fixtures_fail_the_way_they_say_they_do() {
     let mut named: Vec<String> = expected.iter().map(|(f, _)| (*f).to_owned()).collect();
     named.sort();
     assert_eq!(present, named, "an invalid fixture has no test");
+}
+
+/// Parses and checks one fixture by name.
+fn checked(file: &str) -> abnf_oracle::CheckedGrammar {
+    Grammar::parse(&read(&grammars_dir().join(file)))
+        .unwrap_or_else(|e| panic!("{file}: {e}"))
+        .check()
+        .unwrap_or_else(|e| panic!("{file}: {e:?}"))
+}
+
+#[test]
+fn no_fixture_is_left_recursive() {
+    // Not a given: left recursion is a global structural error, so a single left-recursive
+    // rule anywhere would fail the whole grammar. RFC grammars essentially never use it
+    // (SCOPE.md 6.4), and this is that claim checked against seven real ones.
+    for path in valid_fixtures() {
+        let grammar = Grammar::parse(&read(&path)).expect("parses");
+        if let Err(errors) = grammar.check() {
+            assert!(
+                !errors
+                    .iter()
+                    .any(|e| matches!(e, CheckError::LeftRecursion { .. })),
+                "{} is left-recursive: {errors:?}",
+                name(&path)
+            );
+        }
+    }
+}
+
+#[test]
+fn a_zero_repetition_of_prose_keeps_the_uri_grammar_usable() {
+    // RFC 3986 writes `path-empty = 0<pchar>`: zero repetitions of a prose value, meaning the
+    // empty path. A body that can never match is not reachable (D36), so `path-empty` does not
+    // reach prose — and neither do `hier-part`, `URI` or the rest of the grammar that goes
+    // through it. Without that rule this fixture would be almost entirely unusable, which
+    // makes D36 load-bearing rather than a corner case.
+    let uri = checked("rfc3986-uri.abnf");
+    for rule in uri.rules() {
+        assert!(
+            uri.can_recognize(rule.name.as_str()).is_ok(),
+            "{} should be usable as a start rule",
+            rule.name
+        );
+    }
+}
+
+#[test]
+fn prose_is_refused_per_start_rule_on_a_real_grammar() {
+    // RFC 9110 gives its URI rules as `<...>` references into RFC 3986. The rules that reach
+    // them are refused; the rest of the grammar stays usable, which is the whole point of
+    // making this a per-start-rule limit rather than a grammar-wide one (D11).
+    let http = checked("rfc9110-http.abnf");
+
+    assert!(
+        matches!(
+            http.can_recognize("Location"),
+            Err(MatchError::ProseValueReachable { .. })
+        ),
+        "Location is defined as a URI-reference, which is prose"
+    );
+    assert!(
+        http.can_recognize("Allow").is_ok(),
+        "a rule that reaches no prose is still usable"
+    );
+
+    let refused = http
+        .rules()
+        .iter()
+        .filter(|rule| http.can_recognize(rule.name.as_str()).is_err())
+        .count();
+    assert!(
+        (1..http.rules().len()).contains(&refused),
+        "expected some rules refused and most usable, got {refused} of {}",
+        http.rules().len()
+    );
 }

@@ -1,0 +1,7 @@
+; Invalid on purpose: a rule that can begin with itself.
+; The set-of-positions recognizer cannot terminate on this, so it is a
+; structural error rather than a compatibility limit (SCOPE.md 6.4).
+; Expected: CheckError::LeftRecursion
+; Errata applied: none
+
+start          =  start "x" / "y"

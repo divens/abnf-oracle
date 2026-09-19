@@ -20,17 +20,17 @@
 //! witness, the first-graph and its cycles, and the per-rule prose and representability flags.
 
 use std::cmp::Reverse;
-use std::collections::BTreeMap;
 use std::collections::BinaryHeap;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use crate::ast::{
-    DefinedAs, Element, Grammar, MinLen, Node, NodeId, NumVal, Rule, RuleId, RuleName, Span,
-    Witness,
+    DefinedAs, Element, Grammar, Ignored, MinLen, Node, NodeId, NumVal, Rule, RuleId, RuleName,
+    Span, Witness,
 };
 use crate::core_rules;
-use crate::error::CheckError;
+use crate::error::{CheckError, MatchError};
 
 /// A grammar that passed structural validation.
 ///
@@ -53,6 +53,10 @@ pub struct CheckedGrammar {
     min_len: Vec<MinLen>,
     /// Per node: the choice that shortest match makes, for the generator (D28).
     witness: Vec<Option<Witness>>,
+    /// Per rule: a prose value it can reach, if any.
+    reaches_prose: Vec<Option<String>>,
+    /// Per rule: an unrepresentable terminal it can reach, if any.
+    reaches_unrepresentable: Vec<Option<String>>,
 }
 
 impl Grammar {
@@ -73,11 +77,12 @@ impl Grammar {
         builder.lower_rules(core_table(), Scope::Core);
         errors.append(&mut builder.errors);
 
-        if errors.is_empty() {
-            Ok(builder.finish(merged.len()))
-        } else {
-            Err(errors)
+        if !errors.is_empty() {
+            // Stop here: with a name unresolved or a range inverted, the first-graph is
+            // incomplete and any cycle it reported would be guesswork.
+            return Err(errors);
         }
+        builder.finish(merged.len())
     }
 }
 
@@ -150,6 +155,41 @@ impl CheckedGrammar {
     #[must_use]
     pub fn witness(&self, id: NodeId) -> Option<Witness> {
         self.witness[id.index()]
+    }
+
+    /// Whether `rule` can be used as a start rule for recognition.
+    ///
+    /// The compatibility limits of SCOPE.md 6.6, checked without any input: a rule that can
+    /// reach a prose value has no defined matching semantics, and one that can reach a terminal
+    /// no Unicode scalar value can match would silently never match it. Both are refused per
+    /// start rule, so a grammar with prose in one obscure branch stays usable from every other
+    /// entry point (D4, D11).
+    ///
+    /// # Errors
+    ///
+    /// [`MatchError::UnknownRule`] if no such rule exists, or the compatibility limit that
+    /// applies.
+    pub fn can_recognize(&self, rule: &str) -> Result<(), MatchError> {
+        let key = rule.to_ascii_lowercase();
+        let index = self
+            .rules
+            .iter()
+            .position(|candidate| candidate.name.key() == key)
+            .ok_or_else(|| MatchError::UnknownRule(rule.to_owned()))?;
+
+        if let Some(prose) = &self.reaches_prose[index] {
+            return Err(MatchError::ProseValueReachable {
+                rule: self.rules[index].name.as_str().to_owned(),
+                prose: prose.clone(),
+            });
+        }
+        if let Some(terminal) = &self.reaches_unrepresentable[index] {
+            return Err(MatchError::UnrepresentableTerminal {
+                rule: self.rules[index].name.as_str().to_owned(),
+                terminal: terminal.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// How many nodes the arena holds, user and core together.
@@ -408,7 +448,7 @@ impl Builder {
         }
     }
 
-    fn finish(self, user_rules: usize) -> CheckedGrammar {
+    fn finish(self, user_rules: usize) -> Result<CheckedGrammar, Vec<CheckError>> {
         let analysis = Analysis {
             rules: &self.rules,
             user_rules,
@@ -416,8 +456,17 @@ impl Builder {
             resolved: &self.resolved,
         };
         let nullable = analysis.nullable();
+
+        // Left recursion is the last structural error, and it needs `nullable` to know what
+        // can be first.
+        let errors = analysis.left_recursion(&nullable);
+        if !errors.is_empty() {
+            return Err(errors);
+        }
+
         let (min_len, witness) = analysis.min_len();
-        CheckedGrammar {
+        let (reaches_prose, reaches_unrepresentable) = analysis.compatibility();
+        Ok(CheckedGrammar {
             rules: self.rules,
             user_rules,
             nodes: self.nodes,
@@ -425,7 +474,9 @@ impl Builder {
             nullable,
             min_len,
             witness,
-        }
+            reaches_prose,
+            reaches_unrepresentable,
+        })
     }
 }
 
@@ -697,6 +748,240 @@ impl Analysis<'_> {
             }
         }
         parents
+    }
+
+    /// For each rule, the rules that can be the first thing it matches.
+    ///
+    /// "First" means reachable at position zero: `B` occurs in `A`'s body preceded only by
+    /// nullable elements (SCOPE.md 6.4). A cycle here is left recursion, which the
+    /// set-of-positions recognizer cannot terminate on.
+    fn first_graph(&self, nullable: &[bool]) -> Vec<Vec<usize>> {
+        let mut edges = vec![Vec::new(); self.rules.len()];
+        for (index, rule) in self.rules.iter().enumerate() {
+            let mut found = BTreeSet::new();
+            self.first_of(rule.body, nullable, &mut found);
+            edges[index] = found.into_iter().collect();
+        }
+        edges
+    }
+
+    /// Collects the rules reachable at position zero from `node`.
+    fn first_of(&self, node: NodeId, nullable: &[bool], found: &mut BTreeSet<usize>) {
+        match &self.nodes[node.index()] {
+            Node::Alt { branches } => {
+                for branch in branches {
+                    self.first_of(*branch, nullable, found);
+                }
+            }
+            Node::Concat { items } => {
+                // Walk while the items so far can all match nothing: the first item that must
+                // consume something ends the prefix.
+                for item in items {
+                    self.first_of(*item, nullable, found);
+                    if !nullable[item.index()] {
+                        break;
+                    }
+                }
+            }
+            Node::Repeat { repeat, body, .. } => {
+                // A body that can never match is not "first" in any sense, and counting it
+                // would make `*0(a)` inside `a` look like left recursion (D36).
+                if !repeat.is_never() {
+                    self.first_of(*body, nullable, found);
+                }
+            }
+            Node::Optional { body } => self.first_of(*body, nullable, found),
+            Node::RuleRef { .. } => {
+                if let Some(target) = self.resolved[node.index()] {
+                    found.insert(self.rule_index(target));
+                }
+            }
+            // Prose never creates an edge, so it cannot cause a spurious left-recursion
+            // failure in a rule that merely mentions it (D26).
+            Node::CharVal(_) | Node::NumVal { .. } | Node::ProseVal(_) => {}
+        }
+    }
+
+    /// Every cycle in the first-graph, each reported once.
+    ///
+    /// Global, not per start rule: an unreachable left-recursive rule still fails. Prose values
+    /// and unrepresentable terminals are legitimate ABNF this crate happens not to support, and
+    /// are refused per start rule; left recursion is always a grammar bug for an ABNF
+    /// recognizer (SCOPE.md 6.4).
+    fn left_recursion(&self, nullable: &[bool]) -> Vec<CheckError> {
+        const WHITE: u8 = 0;
+        const GRAY: u8 = 1;
+        const BLACK: u8 = 2;
+
+        let edges = self.first_graph(nullable);
+        let mut color = vec![WHITE; self.rules.len()];
+        let mut reported: BTreeSet<Vec<usize>> = BTreeSet::new();
+        let mut errors = Vec::new();
+
+        for root in 0..self.rules.len() {
+            if color[root] != WHITE {
+                continue;
+            }
+            // Explicit stack: a deeply nested grammar should not decide how much stack the
+            // checker needs.
+            let mut stack = vec![(root, 0_usize)];
+            let mut path = vec![root];
+            color[root] = GRAY;
+
+            while let Some((node, edge)) = stack.last_mut() {
+                let node = *node;
+                if let Some(&next) = edges[node].get(*edge) {
+                    *edge += 1;
+                    match color[next] {
+                        WHITE => {
+                            color[next] = GRAY;
+                            path.push(next);
+                            stack.push((next, 0));
+                        }
+                        GRAY => {
+                            let start = path.iter().position(|&r| r == next).expect("on path");
+                            let cycle = self.normalize_cycle(&path[start..]);
+                            // The same cycle is reachable by several routes; report it once.
+                            if reported.insert(cycle.clone()) {
+                                errors.push(CheckError::LeftRecursion {
+                                    cycle: cycle
+                                        .iter()
+                                        .map(|&r| self.rules[r].name.as_str().to_owned())
+                                        .collect(),
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                } else {
+                    color[node] = BLACK;
+                    path.pop();
+                    stack.pop();
+                }
+            }
+        }
+        errors
+    }
+
+    /// Rotates a cycle to start at its earliest-defined rule, so the report does not depend on
+    /// where the traversal happened to enter it.
+    fn normalize_cycle(&self, cycle: &[usize]) -> Vec<usize> {
+        let start = cycle
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, rule)| **rule)
+            .map_or(0, |(position, _)| position);
+        cycle[start..]
+            .iter()
+            .chain(&cycle[..start])
+            .copied()
+            .collect()
+    }
+
+    /// Per rule, an example of a prose value and of an unrepresentable terminal it can reach.
+    ///
+    /// Recorded rather than counted: the compatibility errors name the offending construct, and
+    /// a rule that reaches one is refused only when it is asked to be a start rule (SCOPE.md
+    /// 6.6, D4, D11).
+    fn compatibility(&self) -> (Vec<Option<String>>, Vec<Option<String>>) {
+        let count = self.rules.len();
+        let mut prose: Vec<Option<String>> = vec![None; count];
+        let mut unrepresentable: Vec<Option<String>> = vec![None; count];
+        let mut references = vec![BTreeSet::new(); count];
+
+        for (index, rule) in self.rules.iter().enumerate() {
+            self.scan(
+                rule.body,
+                &mut prose[index],
+                &mut unrepresentable[index],
+                &mut references[index],
+            );
+        }
+
+        // Transitive closure over the reference graph: a rule reaches whatever its references
+        // reach.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for index in 0..count {
+                for referenced in references[index].clone() {
+                    if prose[index].is_none()
+                        && let Some(text) = prose[referenced].clone()
+                    {
+                        prose[index] = Some(text);
+                        changed = true;
+                    }
+                    if unrepresentable[index].is_none()
+                        && let Some(text) = unrepresentable[referenced].clone()
+                    {
+                        unrepresentable[index] = Some(text);
+                        changed = true;
+                    }
+                }
+            }
+        }
+        (prose, unrepresentable)
+    }
+
+    /// Walks one rule body, recording what it contains directly and what it references.
+    fn scan(
+        &self,
+        node: NodeId,
+        prose: &mut Option<String>,
+        unrepresentable: &mut Option<String>,
+        references: &mut BTreeSet<usize>,
+    ) {
+        match &self.nodes[node.index()] {
+            Node::Alt { branches } => {
+                for branch in branches {
+                    self.scan(*branch, prose, unrepresentable, references);
+                }
+            }
+            Node::Concat { items } => {
+                for item in items {
+                    self.scan(*item, prose, unrepresentable, references);
+                }
+            }
+            Node::Repeat { repeat, body, .. } => {
+                // Nothing inside a body that can never match is reachable (D36).
+                if !repeat.is_never() {
+                    self.scan(*body, prose, unrepresentable, references);
+                }
+            }
+            Node::Optional { body } => self.scan(*body, prose, unrepresentable, references),
+            Node::RuleRef { .. } => {
+                if let Some(target) = self.resolved[node.index()] {
+                    references.insert(self.rule_index(target));
+                }
+            }
+            Node::ProseVal(text) => {
+                if prose.is_none() {
+                    *prose = Some(text.clone());
+                }
+            }
+            Node::NumVal { value, .. } => {
+                if unrepresentable.is_none() && !value.is_representable() {
+                    // Canonical spelling, so the error names the terminal as the grammar's own
+                    // `Display` would print it.
+                    *unrepresentable = Some(
+                        Element::NumVal {
+                            value: value.clone(),
+                            span: Ignored(Span::default()),
+                        }
+                        .to_string(),
+                    );
+                }
+            }
+            Node::CharVal(_) => {}
+        }
+    }
+
+    /// Where a rule sits in the combined table.
+    fn rule_index(&self, id: RuleId) -> usize {
+        match id {
+            RuleId::User(index) => index as usize,
+            RuleId::Core(index) => self.user_rules + index as usize,
+        }
     }
 
     /// Whether following witnesses from any productive node terminates.
@@ -1156,7 +1441,11 @@ mod tests {
         // The case that defeats a round-robin fixpoint: both rules settle at 1, so comparing
         // `min_len` cannot order them and the witnesses can end up pointing at each other
         // (SCOPE.md 6.4, D28). Depth breaks the tie, so each points at its terminal.
-        let checked = check("a = b / \"x\"\r\nb = a / \"y\"\r\n");
+        // SCOPE spells this `a = b / "x"`, `b = a / "y"`, which is itself left-recursive and
+        // so never reaches the analyses at all. The `"z"` prefix keeps `a` out of `b`'s first
+        // set while preserving what matters: the rules still reference each other, and `a`'s
+        // two branches still tie at 1.
+        let checked = check("a = b / \"x\"\r\nb = \"z\" a / \"y\"\r\n");
         let a = checked.rule("a").expect("a exists").body;
         let b = checked.rule("b").expect("b exists").body;
 
@@ -1195,7 +1484,7 @@ mod tests {
         // The property the generator's termination rests on. The same check runs as a debug
         // assertion inside `check` itself, so this pins the intent where a reader will see it.
         for src in [
-            "a = b / \"x\"\r\nb = a / \"y\"\r\n",
+            "a = b / \"x\"\r\nb = \"z\" a / \"y\"\r\n",
             "start = \"ok\" / bad\r\nbad = \"x\" bad\r\n",
             // Right recursion only: `*("a" / start)` and `[start] "x"` would each put `start`
             // in its own first set, which M1.7 rejects outright.
@@ -1227,6 +1516,163 @@ mod tests {
         let hexdig = checked.rule("HEXDIG").expect("core HEXDIG").body;
         assert_eq!(checked.min_len(hexdig), MinLen::Finite(1));
         assert!(!checked.is_nullable(hexdig));
+    }
+
+    fn cycle_of(src: &str) -> Vec<String> {
+        let found = errors(src);
+        match found.as_slice() {
+            [CheckError::LeftRecursion { cycle }] => cycle.clone(),
+            other => panic!("expected one left-recursion error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn direct_left_recursion_is_rejected() {
+        assert_eq!(cycle_of("a = a \"x\"\r\n"), ["a"]);
+        assert_eq!(
+            cycle_of("a = \"x\" / a\r\n"),
+            ["a"],
+            "any branch counts, not just the first"
+        );
+    }
+
+    #[test]
+    fn indirect_left_recursion_is_rejected() {
+        assert_eq!(cycle_of("a = b\r\nb = a\r\n"), ["a", "b"]);
+        assert_eq!(
+            cycle_of("a = b\r\nb = c\r\nc = a \"x\"\r\n"),
+            ["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn left_recursion_through_a_nullable_prefix_is_still_left_recursion() {
+        // "First" means reachable at position zero, so anything that can match nothing does not
+        // shield what follows it (SCOPE.md 6.4).
+        assert_eq!(cycle_of("a = [\"p\"] a\r\n"), ["a"]);
+        assert_eq!(cycle_of("a = *\"p\" a\r\n"), ["a"]);
+        assert_eq!(
+            cycle_of("a = \"\" a\r\n"),
+            ["a"],
+            "an empty char-val is nullable"
+        );
+        assert_eq!(cycle_of("a = b a\r\nb = \"\"\r\n"), ["a"]);
+    }
+
+    #[test]
+    fn right_recursion_is_fine() {
+        check("a = \"x\" a\r\n");
+        check("a = \"x\" [a]\r\n");
+        check("a = b\r\nb = \"x\" a\r\n");
+    }
+
+    #[test]
+    fn a_body_that_can_never_match_contributes_no_edges() {
+        // `*0(a)` cannot match anything, so it is not "first" in any sense, and counting it
+        // would turn a harmless dead branch into a left-recursion failure (D36).
+        check("a = *0(a) \"x\"\r\n");
+        check("a = *0(a)\r\n");
+    }
+
+    #[test]
+    fn left_recursion_is_global() {
+        // An unreachable left-recursive rule still fails: it is always a grammar bug for an
+        // ABNF recognizer, unlike prose or an octet range, which are legitimate ABNF this
+        // crate happens not to support (SCOPE.md 6.4).
+        assert_eq!(
+            cycle_of("start = \"ok\"\r\nunused = unused\r\n"),
+            ["unused"]
+        );
+    }
+
+    #[test]
+    fn a_cycle_is_reported_once_and_in_definition_order() {
+        // Reachable from two entry points and enterable at either member, but one error, and
+        // the same one however the traversal got there.
+        let cycle = cycle_of("x = a\r\ny = b\r\na = b\r\nb = a\r\n");
+        assert_eq!(cycle, ["a", "b"]);
+    }
+
+    #[test]
+    fn prose_does_not_create_a_first_graph_edge() {
+        // Prose is assumed non-nullable, so it never causes a spurious left-recursion failure
+        // in a rule that merely mentions it (D26).
+        check("a = <something> a\r\n");
+    }
+
+    // -- compatibility limits (SCOPE.md 6.6) ------------------------------------------------
+
+    #[test]
+    fn prose_is_refused_per_start_rule_not_per_grammar() {
+        let checked = check("withprose = \"a\" / <anything>\r\nplain = \"b\"\r\n");
+        assert!(
+            matches!(
+                checked.can_recognize("withprose"),
+                Err(MatchError::ProseValueReachable { prose, .. }) if prose == "anything"
+            ),
+            "{:?}",
+            checked.can_recognize("withprose")
+        );
+        assert!(
+            checked.can_recognize("plain").is_ok(),
+            "a grammar with prose in one branch stays usable from other entry points"
+        );
+    }
+
+    #[test]
+    fn reaching_prose_transitively_counts() {
+        let checked = check("start = middle\r\nmiddle = <prose here>\r\n");
+        assert!(matches!(
+            checked.can_recognize("start"),
+            Err(MatchError::ProseValueReachable { .. })
+        ));
+    }
+
+    #[test]
+    fn unrepresentable_terminals_are_refused_per_start_rule() {
+        let checked = check("bad = %xD800-DFFF\r\ngood = %x41-5A\r\n");
+        assert!(
+            matches!(
+                checked.can_recognize("bad"),
+                Err(MatchError::UnrepresentableTerminal { terminal, .. })
+                    if terminal == "%xD800-DFFF"
+            ),
+            "{:?}",
+            checked.can_recognize("bad")
+        );
+        assert!(checked.can_recognize("good").is_ok());
+    }
+
+    #[test]
+    fn octet_ranges_remain_usable() {
+        // The documented gap is what `%x80-FF` *means*, not whether it loads (SCOPE.md 3).
+        let checked = check("obs-text = %x80-FF\r\nstart = obs-text\r\n");
+        assert!(checked.can_recognize("start").is_ok());
+    }
+
+    #[test]
+    fn a_dead_branch_hides_what_it_contains() {
+        // Nothing inside a body that can never match is reachable, so it cannot make a start
+        // rule unusable either (D36).
+        let checked = check("start = *0(<prose>) \"x\"\r\n");
+        assert!(checked.can_recognize("start").is_ok());
+    }
+
+    #[test]
+    fn can_recognize_reports_an_unknown_rule() {
+        let checked = check("start = \"a\"\r\n");
+        assert!(matches!(
+            checked.can_recognize("nope"),
+            Err(MatchError::UnknownRule(name)) if name == "nope"
+        ));
+        assert!(
+            checked.can_recognize("START").is_ok(),
+            "names are case-insensitive"
+        );
+        assert!(
+            checked.can_recognize("ALPHA").is_ok(),
+            "core rules are addressable"
+        );
     }
 
     #[test]

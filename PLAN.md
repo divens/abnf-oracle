@@ -435,6 +435,14 @@ be a breaking change.
 ones. `CheckError` needs `DuplicateDefinition`, `IncrementalWithoutBase { name, shadows_core }`,
 `UndefinedRule`, `InvalidRepeatRange`, `InvalidNumericRange`, `LeftRecursion`.
 
+### 3.9b D36 is load-bearing, not a corner case
+
+RFC 3986 defines `path-empty = 0<pchar>` — zero repetitions of a *prose value*, meaning the
+empty path. Because a body that can never match is unreachable (D36), `path-empty` reaches no
+prose. Without that rule it would, and so would `hier-part`, `URI` and every rule routed through
+them, leaving the URI fixture almost entirely unusable as a start-rule set. Pinned by a test
+asserting every rule in that fixture is a usable start rule.
+
 ### 3.9a Fixtures are derived, not typed
 
 `scripts/extract-fixtures.py` builds every `tests/grammars/*.abnf` from the RFC plain text.
@@ -618,7 +626,7 @@ Nine PRs; this is the bulk of the project.
 | **1.4** | `check.rs` steps 1–3: rule-table build, lowering + node ids, hygienic resolution; `Display` + `PartialEq` for `CheckedGrammar`; the four check-error fixtures under `invalid/` | `Grammar::parse(cg.to_string()).check() == cg` on every fixture; duplicate / orphan `=/` / `shadows_core` fixtures fail with the right variant; two textually different grammars with one canonical form get identical node ids |
 | **1.5** | `check.rs` steps 4–5: range validation, representability; spans on `Repeat` and `NumVal` so both errors can point at the offending text | `5*2"a"` and `%x5A-41` fixtures fail, with spans covering exactly `5*2` and `%x5A-41`; a surrogate-spanning range is representable, `%xD800-DFFF` is not; `%x80-FF` stays representable |
 | **1.6** | `check.rs` steps 6–7: `nullable`, `min_len`, `witness` (§4.1), with `(min_len, depth)` ordering | unit tests incl. the saturating case (three nested `4294967295` repeats → `Finite(u64::MAX)`), the `a = b / "x"` tie resolving to the terminals, prose non-nullable; the well-foundedness assertion runs on every check in debug builds |
-| **1.7** | `check.rs` steps 8–9: first-graph, left recursion, per-rule reachability | direct and indirect left-recursion fixtures fail; the prose fixture does not; a `*0(…)` body contributes no edges |
+| **1.7** | `check.rs` steps 8–9: first-graph, left recursion, per-rule reachability; `can_recognize` | direct and indirect left-recursion fixtures fail; no RFC fixture is left-recursive; a `*0(…)` body contributes no edges and hides what it holds; RFC 9110 refuses 25 of 142 start rules for prose and keeps the rest |
 | **1.8** | `lint.rs` + `lint_from` | expected warnings on hand-written cases; the RFC 9110 fixture yields `ShadowsCoreRule` and no errors |
 | **1.9** | CLI `check` and `rules` subcommands | manual smoke run over each fixture |
 

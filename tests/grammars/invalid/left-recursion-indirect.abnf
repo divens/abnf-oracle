@@ -1,0 +1,9 @@
+; Invalid on purpose: left recursion around a cycle of three rules, reached
+; through a nullable prefix so that it is not visible from the first token.
+; Expected: CheckError::LeftRecursion
+; Errata applied: none
+
+start          =  middle "x"
+middle         =  [prefix] tail
+prefix         =  "p"
+tail           =  start / "z"
