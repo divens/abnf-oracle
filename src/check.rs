@@ -19,11 +19,16 @@
 //! M1.5 through M1.7 add the analyses — representability, `nullable`, `min_len` with its
 //! witness, the first-graph and its cycles, and the per-rule prose and representability flags.
 
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
+use std::collections::BinaryHeap;
 use std::collections::btree_map::Entry;
 use std::sync::OnceLock;
 
-use crate::ast::{DefinedAs, Element, Grammar, Node, NodeId, NumVal, Rule, RuleId, RuleName, Span};
+use crate::ast::{
+    DefinedAs, Element, Grammar, MinLen, Node, NodeId, NumVal, Rule, RuleId, RuleName, Span,
+    Witness,
+};
 use crate::core_rules;
 use crate::error::CheckError;
 
@@ -42,6 +47,12 @@ pub struct CheckedGrammar {
     nodes: Vec<Node>,
     /// What each `RuleRef` node resolves to; `None` for every other kind of node.
     resolved: Vec<Option<RuleId>>,
+    /// Per node: whether it can match the empty string (SCOPE.md 6.4).
+    nullable: Vec<bool>,
+    /// Per node: the length of its shortest match, saturating (D27).
+    min_len: Vec<MinLen>,
+    /// Per node: the choice that shortest match makes, for the generator (D28).
+    witness: Vec<Option<Witness>>,
 }
 
 impl Grammar {
@@ -113,6 +124,32 @@ impl CheckedGrammar {
             RuleId::User(index) => &self.rules[index as usize],
             RuleId::Core(index) => &self.rules[self.user_rules + index as usize],
         }
+    }
+
+    /// Whether the node at `id` can match the empty string.
+    #[must_use]
+    pub fn is_nullable(&self, id: NodeId) -> bool {
+        self.nullable[id.index()]
+    }
+
+    /// The length of the shortest string the node at `id` can match.
+    ///
+    /// `MinLen::Infinite` means the node matches nothing — it is *unproductive*. That is a lint,
+    /// not an error: the recognizer handles it fine on finite input, it simply never accepts
+    /// (SCOPE.md 6.4).
+    #[must_use]
+    pub fn min_len(&self, id: NodeId) -> MinLen {
+        self.min_len[id.index()]
+    }
+
+    /// The choice the shortest match at `id` makes, if it has one.
+    ///
+    /// Alternations and optionals record a branch, repetitions their minimum count. Following
+    /// these terminates, which is what lets the generator finish once its depth budget is gone
+    /// (D28).
+    #[must_use]
+    pub fn witness(&self, id: NodeId) -> Option<Witness> {
+        self.witness[id.index()]
     }
 
     /// How many nodes the arena holds, user and core together.
@@ -372,12 +409,325 @@ impl Builder {
     }
 
     fn finish(self, user_rules: usize) -> CheckedGrammar {
+        let analysis = Analysis {
+            rules: &self.rules,
+            user_rules,
+            nodes: &self.nodes,
+            resolved: &self.resolved,
+        };
+        let nullable = analysis.nullable();
+        let (min_len, witness) = analysis.min_len();
         CheckedGrammar {
             rules: self.rules,
             user_rules,
             nodes: self.nodes,
             resolved: self.resolved,
+            nullable,
+            min_len,
+            witness,
         }
+    }
+}
+
+/// The arena, and enough context to follow a rule reference through it.
+struct Analysis<'a> {
+    rules: &'a [Rule],
+    user_rules: usize,
+    nodes: &'a [Node],
+    resolved: &'a [Option<RuleId>],
+}
+
+impl Analysis<'_> {
+    /// The root node of the rule `id` names.
+    fn body_of(&self, id: RuleId) -> NodeId {
+        match id {
+            RuleId::User(index) => self.rules[index as usize].body,
+            RuleId::Core(index) => self.rules[self.user_rules + index as usize].body,
+        }
+    }
+
+    /// What a rule reference at `index` depends on.
+    fn target_body(&self, index: usize) -> Option<NodeId> {
+        self.resolved[index].map(|target| self.body_of(target))
+    }
+
+    /// Which nodes can match the empty string.
+    ///
+    /// A plain least fixpoint. It is boolean, monotone, and carries no witness, so it needs
+    /// none of the machinery `min_len` does.
+    fn nullable(&self) -> Vec<bool> {
+        let mut nullable = vec![false; self.nodes.len()];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            // Children always have higher indices than their parents, so walking backwards
+            // propagates bottom-up and most grammars settle in one pass.
+            for index in (0..self.nodes.len()).rev() {
+                let value = match &self.nodes[index] {
+                    Node::Alt { branches } => branches.iter().any(|b| nullable[b.index()]),
+                    Node::Concat { items } => items.iter().all(|i| nullable[i.index()]),
+                    // Zero repetitions match the empty string whatever the body is, which is
+                    // why `*bad` is nullable even when `bad` matches nothing at all.
+                    Node::Repeat { repeat, body, .. } => repeat.min == 0 || nullable[body.index()],
+                    Node::Optional { .. } => true,
+                    Node::RuleRef { .. } => self
+                        .target_body(index)
+                        .is_some_and(|body| nullable[body.index()]),
+                    // `""` is a legal char-val, and the only nullable terminal.
+                    Node::CharVal(value) => value.value.is_empty(),
+                    // Prose is assumed non-nullable: the assumption that cannot mislead, since
+                    // the only rules it could be wrong about are ones v1 refuses anyway (D26).
+                    Node::NumVal { .. } | Node::ProseVal(_) => false,
+                };
+                if value && !nullable[index] {
+                    nullable[index] = true;
+                    changed = true;
+                }
+            }
+        }
+        nullable
+    }
+
+    /// The shortest match of every node, and the choice that achieves it.
+    ///
+    /// Knuth's generalization of Dijkstra, not a round-robin fixpoint, and the difference is
+    /// the whole point. A node is *finalized* exactly once, in non-decreasing order of its
+    /// final `min_len`, so every witness recorded at finalization names a node finalized
+    /// strictly earlier. Following witnesses therefore terminates — which is what the
+    /// generator rests on when its depth budget runs out (D28). Round-robin arrives at the
+    /// same numbers but cannot give that guarantee: with `a = b / "x"` and `b = a / "y"`, both
+    /// settle at 1 and the witnesses it records can point at each other.
+    ///
+    /// The value functions are all *superior* — each is monotone and at least as large as the
+    /// arguments it uses — which is the condition that makes finalizing the smallest candidate
+    /// sound. An alternation is not `min` over unknowns but one relaxation per branch, exactly
+    /// as a shortest-path edge.
+    fn min_len(&self) -> (Vec<MinLen>, Vec<Option<Witness>>) {
+        let count = self.nodes.len();
+        let mut value = vec![MinLen::Infinite; count];
+        let mut finalized = vec![false; count];
+        let mut witness: Vec<Option<Witness>> = vec![None; count];
+        // How many steps the shortest derivation takes. Ties in `min_len` are broken by
+        // preferring the shallower one, which is what makes a witness chain point at terminals
+        // rather than wandering through equally short rules first: with `a = b / "x"` and
+        // `b = a / "y"`, both alternations settle at 1, and depth is what picks the terminal.
+        // It also bounds the work witness mode does, since the chain it follows is the
+        // shortest available, not merely one of the shortest strings.
+        let mut depth = vec![u32::MAX; count];
+
+        let parents = self.reverse_dependencies();
+        let mut heap: BinaryHeap<Reverse<(u64, u32, usize)>> = BinaryHeap::new();
+
+        // Seed with every node that needs no child: the terminals, and the constructions that
+        // match the empty string outright.
+        for (index, slot) in value.iter_mut().enumerate() {
+            if let MinLen::Finite(length) = self.axiom(index) {
+                *slot = MinLen::Finite(length);
+                heap.push(Reverse((length, 0, index)));
+            }
+        }
+
+        while let Some(Reverse((length, steps, index))) = heap.pop() {
+            if finalized[index] {
+                continue; // A better candidate was taken already; this entry is stale.
+            }
+            finalized[index] = true;
+            value[index] = MinLen::Finite(length);
+            depth[index] = steps;
+            witness[index] = self.witness_for(index, &value, &finalized, &depth, length);
+
+            for parent in &parents[index] {
+                let parent_index = parent.index();
+                if finalized[parent_index] {
+                    continue;
+                }
+                if let Some((candidate, candidate_depth)) =
+                    self.relax(parent_index, &value, &finalized, &depth)
+                    && (candidate, candidate_depth)
+                        < (finite_or_max(value[parent_index]), depth[parent_index])
+                {
+                    value[parent_index] = MinLen::Finite(candidate);
+                    depth[parent_index] = candidate_depth;
+                    heap.push(Reverse((candidate, candidate_depth, parent_index)));
+                }
+            }
+        }
+
+        // Whatever was never finalized cannot be reached from any terminal: it matches nothing.
+        for ((length, witness), done) in value.iter_mut().zip(witness.iter_mut()).zip(&finalized) {
+            if !done {
+                *length = MinLen::Infinite;
+                *witness = None;
+            }
+        }
+
+        debug_assert!(
+            self.witnesses_are_well_founded(&witness, &finalized),
+            "a witness chain cycles, so the generator would not terminate"
+        );
+        (value, witness)
+    }
+
+    /// The value of a node that depends on no child.
+    fn axiom(&self, index: usize) -> MinLen {
+        match &self.nodes[index] {
+            Node::CharVal(value) => MinLen::Finite(value.value.chars().count() as u64),
+            Node::NumVal { value, .. } => MinLen::Finite(match value {
+                NumVal::Scalar(_) | NumVal::Range { .. } => 1,
+                NumVal::Concat(values) => values.len() as u64,
+            }),
+            Node::ProseVal(_) => MinLen::Finite(1),
+            Node::Optional { .. } => MinLen::ZERO,
+            Node::Repeat { repeat, .. } if repeat.min == 0 => MinLen::ZERO,
+            Node::Concat { items } if items.is_empty() => MinLen::ZERO,
+            _ => MinLen::Infinite,
+        }
+    }
+
+    /// A node's best value given what has been finalized so far, with the number of steps the
+    /// derivation takes.
+    fn relax(
+        &self,
+        index: usize,
+        value: &[MinLen],
+        finalized: &[bool],
+        depth: &[u32],
+    ) -> Option<(u64, u32)> {
+        let finite = |id: &NodeId| match value[id.index()] {
+            MinLen::Finite(length) if finalized[id.index()] => Some((length, depth[id.index()])),
+            _ => None,
+        };
+        match &self.nodes[index] {
+            // Each branch is its own way of reaching the alternation, so this is ordinary
+            // shortest-path relaxation, not a `min` over unknowns.
+            Node::Alt { branches } => branches
+                .iter()
+                .filter_map(finite)
+                .min()
+                .map(|(length, steps)| (length, steps + 1)),
+            Node::Concat { items } => {
+                let parts: Option<Vec<(u64, u32)>> = items.iter().map(finite).collect();
+                parts.map(|parts| {
+                    let length = parts.iter().fold(MinLen::ZERO, |sum, (part, _)| {
+                        sum.saturating_add(MinLen::Finite(*part))
+                    });
+                    let steps = parts.iter().map(|(_, s)| *s).max().unwrap_or(0) + 1;
+                    (finite_or_max(length), steps)
+                })
+            }
+            Node::Repeat { repeat, body, .. } => {
+                if repeat.min == 0 {
+                    Some((0, 0))
+                } else {
+                    finite(body).map(|(length, steps)| {
+                        // Saturating: three nested `4294967295` repetitions overflow `u64`
+                        // even though every bound fits in one, and a saturated value is still
+                        // finite, hence still productive (D27).
+                        let total = MinLen::Finite(length).saturating_mul(repeat.min);
+                        (finite_or_max(total), steps + 1)
+                    })
+                }
+            }
+            Node::Optional { .. } => Some((0, 0)),
+            Node::RuleRef { .. } => self
+                .target_body(index)
+                .and_then(|body| finite(&body))
+                .map(|(length, steps)| (length, steps + 1)),
+            _ => match self.axiom(index) {
+                MinLen::Finite(length) => Some((length, 0)),
+                MinLen::Infinite => None,
+            },
+        }
+    }
+
+    /// The choice a node's shortest derivation makes.
+    fn witness_for(
+        &self,
+        index: usize,
+        value: &[MinLen],
+        finalized: &[bool],
+        depth: &[u32],
+        length: u64,
+    ) -> Option<Witness> {
+        match &self.nodes[index] {
+            Node::Alt { branches } => branches
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| finalized[b.index()] && value[b.index()] == MinLen::Finite(length))
+                // Shallowest first, then leftmost, so the choice is deterministic and the
+                // chain the generator follows is as short as the grammar allows.
+                .min_by_key(|(branch, b)| (depth[b.index()], *branch))
+                .map(|(branch, _)| Witness::Branch(branch as u32)),
+            // `[x]` is `x / empty`, and the empty arm is both the shortest and the one that
+            // descends into nothing.
+            Node::Optional { .. } => Some(Witness::Branch(1)),
+            Node::Repeat { repeat, .. } => Some(Witness::Count(repeat.min)),
+            _ => None,
+        }
+    }
+
+    /// For each node, the nodes whose value depends on it.
+    ///
+    /// A rule reference depends on the body of the rule it resolves to, so the arena's parent
+    /// links alone would leave the graph disconnected at every reference.
+    fn reverse_dependencies(&self) -> Vec<Vec<NodeId>> {
+        let mut parents = vec![Vec::new(); self.nodes.len()];
+        for (index, node) in self.nodes.iter().enumerate() {
+            let parent = NodeId::from_index(index as u32);
+            match node {
+                Node::Alt { branches } => {
+                    for child in branches {
+                        parents[child.index()].push(parent);
+                    }
+                }
+                Node::Concat { items } => {
+                    for child in items {
+                        parents[child.index()].push(parent);
+                    }
+                }
+                Node::Repeat { body, .. } | Node::Optional { body } => {
+                    parents[body.index()].push(parent);
+                }
+                Node::RuleRef { .. } => {
+                    if let Some(body) = self.target_body(index) {
+                        parents[body.index()].push(parent);
+                    }
+                }
+                Node::CharVal(_) | Node::NumVal { .. } | Node::ProseVal(_) => {}
+            }
+        }
+        parents
+    }
+
+    /// Whether following witnesses from any productive node terminates.
+    ///
+    /// The property the generator's termination rests on (D28, PLAN.md R3). A regression here
+    /// should be a failing test, not a hang in the field, so it is asserted in debug builds
+    /// every time a grammar is checked.
+    fn witnesses_are_well_founded(&self, witness: &[Option<Witness>], finalized: &[bool]) -> bool {
+        for (start, _) in finalized.iter().enumerate().filter(|(_, done)| **done) {
+            let mut at = start;
+            let mut steps = 0;
+            // Only alternations delegate to a single child; every other node either stops or
+            // descends into children the walker handles itself.
+            while let (Node::Alt { branches }, Some(Witness::Branch(branch))) =
+                (&self.nodes[at], witness[at])
+            {
+                at = branches[branch as usize].index();
+                steps += 1;
+                if steps > self.nodes.len() {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+
+fn finite_or_max(value: MinLen) -> u64 {
+    match value {
+        MinLen::Finite(length) => length,
+        MinLen::Infinite => u64::MAX,
     }
 }
 
@@ -645,6 +995,238 @@ mod tests {
         let checked = check("\r\n");
         assert!(checked.rules().is_empty());
         assert_eq!(checked.core_rules().len(), core_rules::CORE_RULE_COUNT);
+    }
+
+    /// The analyses of a one-rule grammar's body.
+    fn body_of_start(src: &str) -> (CheckedGrammar, NodeId) {
+        let checked = check(src);
+        let body = checked.rule("start").expect("start exists").body;
+        (checked, body)
+    }
+
+    fn nullable(elements: &str) -> bool {
+        let (checked, body) = body_of_start(&format!("start = {elements}\r\n"));
+        checked.is_nullable(body)
+    }
+
+    fn min_len(elements: &str) -> MinLen {
+        let (checked, body) = body_of_start(&format!("start = {elements}\r\n"));
+        checked.min_len(body)
+    }
+
+    #[test]
+    fn nullability_of_each_construction() {
+        assert!(
+            nullable("\"\""),
+            "an empty char-val is the one nullable terminal"
+        );
+        assert!(nullable("[\"a\"]"));
+        assert!(nullable("*\"a\""));
+        assert!(nullable("0*3\"a\""));
+        assert!(nullable("\"\" \"\""), "a concatenation of nullables");
+        assert!(
+            nullable("\"a\" / \"\""),
+            "an alternation with one nullable branch"
+        );
+
+        assert!(!nullable("\"a\""));
+        assert!(!nullable("%x41"));
+        assert!(!nullable("1*\"a\""));
+        assert!(
+            !nullable("\"a\" \"\""),
+            "a concatenation needs every item nullable"
+        );
+        assert!(!nullable("\"a\" / \"b\""));
+    }
+
+    #[test]
+    fn nullability_follows_rule_references() {
+        let checked = check("start = empty\r\nempty = \"\"\r\n");
+        let start = checked.rule("start").expect("start exists").body;
+        assert!(checked.is_nullable(start));
+        // LWSP is the one core rule that matches the empty string.
+        let lwsp = checked.rule("LWSP").expect("core LWSP").body;
+        assert!(checked.is_nullable(lwsp));
+        let digit = checked.rule("DIGIT").expect("core DIGIT").body;
+        assert!(!checked.is_nullable(digit));
+    }
+
+    #[test]
+    fn prose_is_non_nullable_and_one_character_long() {
+        // The assumption that cannot mislead: prose never makes a branch look unproductive and
+        // never creates a first-graph edge, and the only rules it could be wrong about are the
+        // ones v1 refuses to recognize or generate from anyway (D26).
+        assert!(!nullable("<any token>"));
+        assert_eq!(min_len("<any token>"), MinLen::Finite(1));
+    }
+
+    #[test]
+    fn shortest_matches_of_the_terminals() {
+        assert_eq!(min_len("\"\""), MinLen::ZERO);
+        assert_eq!(min_len("\"abc\""), MinLen::Finite(3));
+        assert_eq!(min_len("%x41"), MinLen::Finite(1));
+        assert_eq!(min_len("%x41-5A"), MinLen::Finite(1));
+        assert_eq!(
+            min_len("%x41.42.43"),
+            MinLen::Finite(3),
+            "a concatenation of three"
+        );
+    }
+
+    #[test]
+    fn shortest_matches_compose() {
+        assert_eq!(
+            min_len("\"ab\" \"cde\""),
+            MinLen::Finite(5),
+            "concatenation sums"
+        );
+        assert_eq!(
+            min_len("\"abc\" / \"d\""),
+            MinLen::Finite(1),
+            "alternation minimizes"
+        );
+        assert_eq!(
+            min_len("[\"abc\"]"),
+            MinLen::ZERO,
+            "an optional can be skipped"
+        );
+        assert_eq!(
+            min_len("*\"abc\""),
+            MinLen::ZERO,
+            "so can a repetition with no minimum"
+        );
+        assert_eq!(
+            min_len("3\"ab\""),
+            MinLen::Finite(6),
+            "repetition multiplies"
+        );
+        assert_eq!(
+            min_len("2*5\"ab\""),
+            MinLen::Finite(4),
+            "by the minimum, not the maximum"
+        );
+    }
+
+    #[test]
+    fn shortest_matches_saturate_rather_than_overflow() {
+        // Three nested repetitions whose bounds each fit in 32 bits, whose product does not.
+        let nested = min_len("4294967295(4294967295(4294967295\"x\"))");
+        assert_eq!(nested, MinLen::Finite(u64::MAX));
+        assert!(
+            nested.is_finite(),
+            "saturated is still finite, hence still productive (D27)"
+        );
+
+        // Two levels still fit, so the saturation above is real arithmetic, not a short circuit.
+        assert_eq!(
+            min_len("4294967295(4294967295\"x\")"),
+            MinLen::Finite(4_294_967_295 * 4_294_967_295)
+        );
+    }
+
+    #[test]
+    fn a_rule_that_matches_nothing_is_unproductive() {
+        let checked = check("thing = \"x\" thing\r\n");
+        let thing = checked.rule("thing").expect("thing exists").body;
+        assert_eq!(checked.min_len(thing), MinLen::Infinite);
+        assert_eq!(
+            checked.witness(thing),
+            None,
+            "there is no shortest derivation to record"
+        );
+        // Unproductive is a lint, not an error: the grammar checked (SCOPE.md 6.4).
+    }
+
+    #[test]
+    fn an_unproductive_branch_does_not_infect_its_alternation() {
+        let checked = check("start = \"ok\" / bad\r\nbad = \"x\" bad\r\n");
+        let start = checked.rule("start").expect("start exists").body;
+        assert_eq!(checked.min_len(start), MinLen::Finite(2));
+        assert_eq!(
+            checked.witness(start),
+            Some(Witness::Branch(0)),
+            "the productive branch is the shortest derivation"
+        );
+        let bad = checked.rule("bad").expect("bad exists").body;
+        assert_eq!(checked.min_len(bad), MinLen::Infinite);
+    }
+
+    #[test]
+    fn tied_shortest_matches_still_give_well_founded_witnesses() {
+        // The case that defeats a round-robin fixpoint: both rules settle at 1, so comparing
+        // `min_len` cannot order them and the witnesses can end up pointing at each other
+        // (SCOPE.md 6.4, D28). Depth breaks the tie, so each points at its terminal.
+        let checked = check("a = b / \"x\"\r\nb = a / \"y\"\r\n");
+        let a = checked.rule("a").expect("a exists").body;
+        let b = checked.rule("b").expect("b exists").body;
+
+        assert_eq!(checked.min_len(a), MinLen::Finite(1));
+        assert_eq!(checked.min_len(b), MinLen::Finite(1));
+        assert_eq!(
+            checked.witness(a),
+            Some(Witness::Branch(1)),
+            "a takes \"x\""
+        );
+        assert_eq!(
+            checked.witness(b),
+            Some(Witness::Branch(1)),
+            "b takes \"y\""
+        );
+    }
+
+    #[test]
+    fn witnesses_for_optionals_and_repetitions() {
+        let (checked, body) = body_of_start("start = [\"a\"]\r\n");
+        assert_eq!(
+            checked.witness(body),
+            Some(Witness::Branch(1)),
+            "[x] is x / empty, and the empty arm is both shortest and childless"
+        );
+
+        let (checked, body) = body_of_start("start = 2*5\"a\"\r\n");
+        assert_eq!(checked.witness(body), Some(Witness::Count(2)));
+
+        let (checked, body) = body_of_start("start = *\"a\"\r\n");
+        assert_eq!(checked.witness(body), Some(Witness::Count(0)));
+    }
+
+    #[test]
+    fn following_witnesses_terminates_on_every_fixture_shape() {
+        // The property the generator's termination rests on. The same check runs as a debug
+        // assertion inside `check` itself, so this pins the intent where a reader will see it.
+        for src in [
+            "a = b / \"x\"\r\nb = a / \"y\"\r\n",
+            "start = \"ok\" / bad\r\nbad = \"x\" bad\r\n",
+            // Right recursion only: `*("a" / start)` and `[start] "x"` would each put `start`
+            // in its own first set, which M1.7 rejects outright.
+            "start = \"a\" *(\"b\" / start)\r\n",
+            "start = \"x\" [start]\r\n",
+            "start = ALPHA / DIGIT / HEXDIG\r\n",
+        ] {
+            let checked = check(src);
+            for rule in checked.rules() {
+                if checked.min_len(rule.body).is_finite() {
+                    let mut at = rule.body;
+                    for _ in 0..=checked.node_count() {
+                        let Node::Alt { branches } = checked.node(at) else {
+                            break;
+                        };
+                        let Some(Witness::Branch(branch)) = checked.witness(at) else {
+                            panic!("{src:?}: a productive alternation has no witness")
+                        };
+                        at = branches[branch as usize];
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn analyses_reach_the_core_environment() {
+        let checked = check("start = HEXDIG\r\n");
+        let hexdig = checked.rule("HEXDIG").expect("core HEXDIG").body;
+        assert_eq!(checked.min_len(hexdig), MinLen::Finite(1));
+        assert!(!checked.is_nullable(hexdig));
     }
 
     #[test]

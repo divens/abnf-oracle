@@ -498,6 +498,15 @@ Every witness therefore points at an already-finalized node, so following witnes
 descends the finalization order and terminates — exactly what the generator's witness mode
 needs — and it holds even when values saturate at `u64::MAX` (D27) or tie.
 
+**Order ties by derivation depth, not by node index** (found in M1.6). Well-foundedness holds
+either way, but the *choice* of witness does not: in `a = b / "x"`, `b = a / "y"` both
+alternations settle at `min_len` 1, and breaking the tie by arena position finalizes `b` through
+the reference to `a` before `"y"` is ever popped — so `b`'s witness names `a`, and SCOPE's
+"witnesses point at the terminals" is false while the guarantee still holds. Keying the worklist
+on `(min_len, depth)` and picking the shallowest branch that achieves the value fixes it, makes
+the choice deterministic, and bounds witness-mode work by the shortest *derivation* rather than
+merely the shortest string.
+
 Needs a reverse-dependency map (child node → parent node; rule → referring `RuleRef` nodes),
 built in one pass over the arena. `nullable` does *not* need this treatment: boolean, monotone,
 no witness, so plain round-robin is fine and simpler.
@@ -608,7 +617,7 @@ Nine PRs; this is the bulk of the project.
 | **1.3** | `core_rules.rs` + `scripts/extract-fixtures.py` deriving all nine fixtures from RFC text; `tests/parse_grammars.rs`; the ASCII-cleanliness scan | every fixture parses and round-trips, under both line-ending settings; the scan passes |
 | **1.4** | `check.rs` steps 1–3: rule-table build, lowering + node ids, hygienic resolution; `Display` + `PartialEq` for `CheckedGrammar`; the four check-error fixtures under `invalid/` | `Grammar::parse(cg.to_string()).check() == cg` on every fixture; duplicate / orphan `=/` / `shadows_core` fixtures fail with the right variant; two textually different grammars with one canonical form get identical node ids |
 | **1.5** | `check.rs` steps 4–5: range validation, representability; spans on `Repeat` and `NumVal` so both errors can point at the offending text | `5*2"a"` and `%x5A-41` fixtures fail, with spans covering exactly `5*2` and `%x5A-41`; a surrogate-spanning range is representable, `%xD800-DFFF` is not; `%x80-FF` stays representable |
-| **1.6** | `check.rs` steps 6–7: `nullable`, `min_len`, `witness` (§4.1) | unit tests incl. the saturating case (three nested `4294967295` repeats → `Finite(u64::MAX)`), the `a = b / "x"` tie, prose non-nullable |
+| **1.6** | `check.rs` steps 6–7: `nullable`, `min_len`, `witness` (§4.1), with `(min_len, depth)` ordering | unit tests incl. the saturating case (three nested `4294967295` repeats → `Finite(u64::MAX)`), the `a = b / "x"` tie resolving to the terminals, prose non-nullable; the well-foundedness assertion runs on every check in debug builds |
 | **1.7** | `check.rs` steps 8–9: first-graph, left recursion, per-rule reachability | direct and indirect left-recursion fixtures fail; the prose fixture does not; a `*0(…)` body contributes no edges |
 | **1.8** | `lint.rs` + `lint_from` | expected warnings on hand-written cases; the RFC 9110 fixture yields `ShadowsCoreRule` and no errors |
 | **1.9** | CLI `check` and `rules` subcommands | manual smoke run over each fixture |
@@ -666,7 +675,7 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 |---|---|---|
 | R1 | **Stack overflow in `recognize` on deeply nested input.** JSONTestSuite ships `n_structures_100000_opening_arrays.json` and friends; recursion depth there is ~input length. | Run corpus tests on a thread with an explicit 64 MB stack (`std::thread::Builder::stack_size`). If it still blows, classify those specific cases in `NOTES.md` as depth-limited and document the limit. Decide in PR 2.4, not later. |
 | R2 | **Rule 2 implemented as "any branch that reaches an uncovered unit" rather than `argmin dist`.** It is the natural simplification, it passes the JSON coverage test, and it is wrong — D38's termination argument needs the strictly decreasing measure. | The chase test is the guard: rev 5.2 records that the naive version fails it with `OutputLimit`. Keep the debug assertion of R10 as the second line of defence, and do not relax the chase fixture to something shallower. |
-| R3 | Witness cycles from a round-robin `min_len` fixpoint. | Knuth worklist (§4.1), plus a debug assertion that following witnesses from any productive node terminates within `nodes.len()` steps. |
+| R3 | ~~Witness cycles from a round-robin `min_len` fixpoint.~~ **Closed in M1.6.** | Knuth worklist (§4.1) with `(min_len, depth)` ordering, plus a debug assertion — live on every `check`, so it runs over all nine fixtures and every test grammar — that following witnesses from any productive node terminates within `nodes.len()` steps. |
 | R4 | ~~Fixture transcription errors across seven RFC grammars, by hand.~~ **Retired in M1.3: nothing was transcribed by hand.** | `scripts/extract-fixtures.py` derives all nine fixtures from the RFC texts and is verified to reproduce them byte for byte. Three independent checks passed: every content line appears verbatim in its source RFC, no fixture has an undefined rule reference, and the two derived fixtures differ from their base by exactly the errata substitutions and the RFC 7405 splice. The M4 cross-check against `abnfgen` / go-abnf still stands. |
 | R5 | Git line-ending mangling on Windows silently changing corpus bytes. | `.gitattributes` in PR 0.1, plus a test reading one known corpus file and asserting its exact byte length. |
 | R6 | ~~Errata 2968 / 3076 wording taken from memory rather than the errata page.~~ **Fired, and was caught in M1.1.** SCOPE rev 5.2 had the two errata's subjects transposed and treated 3076 as a numeric-value clarification, which would have left `rulelist` ambiguous in the canonical fixture. | Fixed in SCOPE rev 5.3 / D39. The mitigation stands for PR 1.3: paste the corrected productions into each fixture header, from the errata page, never from memory. |
