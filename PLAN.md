@@ -327,6 +327,16 @@ A pure function of `CheckedGrammar`; never fails; never consulted by anything el
 | `UnproductiveAlternative` | no | an `Alt` branch with `min_len == Infinite` inside a rule whose own `min_len` is finite |
 | `ShadowsCoreRule` | no | user rule name matches a core rule name (ASCII-insensitive) |
 
+Three decisions the table does not capture, each made in M1.8:
+
+- **Core rules are never linted.** They are the resolution environment, not the user's grammar;
+  sixteen unreferenced-rule warnings on every grammar would make the output worthless.
+- **A self-reference does not count as a reference.** `start = "x" [start]` is still unused by
+  the rest of the grammar, which is what the warning is for. The consequence is that the entry
+  rule of *any* grammar is reported unreferenced — correct, and exactly why `lint_from` exists.
+- **`lint_from` ignores names matching no rule.** With no error channel in the signature, the
+  alternative is to report every rule as unreachable because of a typo.
+
 `UnproductiveAlternative` deliberately does not fire for every branch of a wholly unproductive
 rule — that is already `UnproductiveRule`, and duplicating it is noise.
 
@@ -627,7 +637,7 @@ Nine PRs; this is the bulk of the project.
 | **1.5** | `check.rs` steps 4–5: range validation, representability; spans on `Repeat` and `NumVal` so both errors can point at the offending text | `5*2"a"` and `%x5A-41` fixtures fail, with spans covering exactly `5*2` and `%x5A-41`; a surrogate-spanning range is representable, `%xD800-DFFF` is not; `%x80-FF` stays representable |
 | **1.6** | `check.rs` steps 6–7: `nullable`, `min_len`, `witness` (§4.1), with `(min_len, depth)` ordering | unit tests incl. the saturating case (three nested `4294967295` repeats → `Finite(u64::MAX)`), the `a = b / "x"` tie resolving to the terminals, prose non-nullable; the well-foundedness assertion runs on every check in debug builds |
 | **1.7** | `check.rs` steps 8–9: first-graph, left recursion, per-rule reachability; `can_recognize` | direct and indirect left-recursion fixtures fail; no RFC fixture is left-recursive; a `*0(…)` body contributes no edges and hides what it holds; RFC 9110 refuses 25 of 142 start rules for prose and keeps the rest |
-| **1.8** | `lint.rs` + `lint_from` | expected warnings on hand-written cases; the RFC 9110 fixture yields `ShadowsCoreRule` and no errors |
+| **1.8** | `lint.rs` + `lint_from` | expected warnings on hand-written cases; RFC 8259 yields exactly one `ShadowsCoreRule`, for `char`, and the core-rules fixture sixteen; no fixture has a dead rule or branch |
 | **1.9** | CLI `check` and `rules` subcommands | manual smoke run over each fixture |
 
 Invalid fixtures needed (`tests/grammars/invalid/`), one file each: undefined rule, duplicate

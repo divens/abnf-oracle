@@ -11,7 +11,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use abnf_oracle::{CheckError, Grammar, MatchError, ParseOptions};
+use abnf_oracle::{CheckError, Grammar, LintWarning, MatchError, ParseOptions};
 
 /// Deliberately broken fixtures live here; other tests assert how they fail.
 const INVALID: &str = "invalid";
@@ -417,5 +417,74 @@ fn prose_is_refused_per_start_rule_on_a_real_grammar() {
         (1..http.rules().len()).contains(&refused),
         "expected some rules refused and most usable, got {refused} of {}",
         http.rules().len()
+    );
+}
+
+#[test]
+fn json_shadows_exactly_one_core_rule() {
+    // RFC 8259 defines `char = unescaped / escape (...)`, which shadows `CHAR = %x01-7F` under
+    // case-insensitive rule names. This is the real grammar that makes shadowing a lint rather
+    // than an error: as an error it would reject JSON outright (D6, D40).
+    let json = checked("rfc8259-json.abnf");
+    let shadows: Vec<String> = json
+        .lint()
+        .iter()
+        .filter_map(|w| match w {
+            LintWarning::ShadowsCoreRule { name } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(shadows, ["char"]);
+}
+
+#[test]
+fn the_core_rules_fixture_shadows_all_sixteen() {
+    let core = checked("rfc5234-core.abnf");
+    let shadows = core
+        .lint()
+        .iter()
+        .filter(|w| matches!(w, LintWarning::ShadowsCoreRule { .. }))
+        .count();
+    assert_eq!(
+        shadows, 16,
+        "it is Appendix B, so it shadows every rule in Appendix B"
+    );
+}
+
+#[test]
+fn no_fixture_has_a_dead_rule_or_branch() {
+    // Unproductive rules and dead alternation branches are almost always grammar bugs, so
+    // finding one in a published RFC grammar would be news — about the fixture or about the
+    // analysis.
+    for path in valid_fixtures() {
+        let grammar = Grammar::parse(&read(&path))
+            .expect("parses")
+            .check()
+            .expect("checks");
+        for warning in grammar.lint() {
+            assert!(
+                !matches!(
+                    warning,
+                    LintWarning::UnproductiveRule { .. }
+                        | LintWarning::UnproductiveAlternative { .. }
+                ),
+                "{}: {warning}",
+                name(&path)
+            );
+        }
+    }
+}
+
+#[test]
+fn naming_the_entry_point_silences_the_unreachable_warning() {
+    let json = checked("rfc8259-json.abnf");
+    let unreachable = json
+        .lint_from(&["JSON-text"])
+        .iter()
+        .filter(|w| matches!(w, LintWarning::UnreachableRule { .. }))
+        .count();
+    assert_eq!(
+        unreachable, 0,
+        "every JSON rule is reachable from JSON-text"
     );
 }

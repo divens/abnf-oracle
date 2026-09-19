@@ -192,6 +192,20 @@ impl CheckedGrammar {
         Ok(())
     }
 
+    /// How many rules the user's grammar defines.
+    #[must_use]
+    pub const fn user_rule_count(&self) -> usize {
+        self.user_rules
+    }
+
+    /// Where a rule sits in the combined table, core rules following the user's.
+    pub(crate) const fn rule_index(&self, id: RuleId) -> usize {
+        match id {
+            RuleId::User(index) => index as usize,
+            RuleId::Core(index) => self.user_rules + index as usize,
+        }
+    }
+
     /// How many nodes the arena holds, user and core together.
     #[must_use]
     pub fn node_count(&self) -> usize {
