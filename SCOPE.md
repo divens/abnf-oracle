@@ -1,10 +1,10 @@
-# Scoping document: `abnf-oracle` (revision 5.3)
+# Scoping document: `abnf-oracle` (revision 5.4)
 
 A small, correct, dependency-light Rust crate that parses ABNF grammars (RFC 5234, RFC 7405), recognizes whether an input matches a rule, and generates random inputs that match a rule. Built to be a **testing oracle**, not a production parser.
 
 Working crate name: `abnf-oracle` (rename freely; `abnf` on crates.io is taken by an unmaintained crate with a different scope).
 
-Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
+Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar; 5.4 completes §6.7's parenthesization rule, which covered two of the four cases that need parentheses. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
 
 ---
 
@@ -289,8 +289,17 @@ Comments are not preserved at either layer (semantic-only model).
 | Case-sensitive string | `%s"abc"` |
 | Empty string | `""` |
 | Repetition | `*a`, `3a`, `2*5a`, `*3a`, `3*a`; never `0*a`, never `*1a` (that is `[a]`), never `1*1a` (that is `a`) |
-| Parenthesization | an alternation nested inside a concatenation or a repetition is parenthesized; a concatenation inside an alternation branch is not; `[x]` never takes outer parentheses; redundant groups are dropped |
+| Parenthesization | Emitted exactly where dropping them would change the parse, and nowhere else (below) |
 | Whitespace | single spaces between elements, ` = ` / ` =/ ` around the definition operator, no trailing whitespace, CRLF line endings |
+
+**Parentheses.** An element is parenthesized in exactly two positions:
+
+- as an **item of a concatenation**, if it is an alternation;
+- as the **body of a repetition**, if it is an alternation, a concatenation, or another repetition.
+
+Nowhere else. A concatenation in an alternation branch, a repetition as an item of a concatenation, an optional in any position, and the contents of `(…)` or `[…]` all stand bare; `[x]` never takes outer parentheses, and a group that survives none of the above is dropped.
+
+The three repetition-body cases are the ones easy to miss, and each breaks the round-trip on its own: `*(a b)` printed as `*a b` reads back as `(*a) b`; `*(a / b)` printed as `*a / b` reads back as `(*a) / b`; and `*(2*a)` printed as `*2*a` does not parse at all, because RFC 5234's `element` admits neither `concatenation`, `alternation` nor `repetition` — only a rule name, a group, an option, or a terminal.
 
 ### 6.8 Generator
 
