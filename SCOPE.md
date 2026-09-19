@@ -1,10 +1,10 @@
-# Scoping document: `abnf-oracle` (revision 5.5)
+# Scoping document: `abnf-oracle` (revision 5.6)
 
 A small, correct, dependency-light Rust crate that parses ABNF grammars (RFC 5234, RFC 7405), recognizes whether an input matches a rule, and generates random inputs that match a rule. Built to be a **testing oracle**, not a production parser.
 
 Working crate name: `abnf-oracle` (rename freely; `abnf` on crates.io is taken by an unmaintained crate with a different scope).
 
-Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar; 5.4 completes §6.7's parenthesization rule, which covered two of the four cases that need parentheses; 5.5 corrects the claim that RFC 3986 and RFC 9110 restate the core rules, which neither does. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
+Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar; 5.4 completes §6.7's parenthesization rule, which covered two of the four cases that need parentheses; 5.5 corrects the claim that RFC 3986 and RFC 9110 restate the core rules, which neither does; 5.6 replaces the witness tie-case grammar, which was itself left-recursive and so could never be checked, and states the witness rule in terms of derivation length. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
 
 ---
 
@@ -235,7 +235,7 @@ Additionally, a property test compares the recognizer against a brute-force enum
 
 - **nullable(n)**: can `n` match the empty string?
 - **min_len(n)**: length of the shortest string `n` can match, as `MinLen::Finite(u64)` or `MinLen::Infinite`. Arithmetic on the finite variant **saturates** at `u64::MAX`: nested repetitions can produce a shortest expansion that overflows even though every literal fits (§6.1), and a saturated value is still *finite*, hence still productive. A node is **productive** iff `min_len` is finite.
-- **witness(n)**: for every alternation node with finite `min_len`, the branch that *first* attained the node's final `min_len` during fixpoint iteration; for every repetition, the count `min`. Witnesses form a well-founded derivation: each was fixed at an earlier iteration than the node that refers to it, so following witnesses from any productive node reaches terminals in finitely many steps. This is the generator's termination device (§6.8) — comparing `min_len` magnitudes is *not*, since ties (`a = b / "x"`, `b = a / "y"`, both `min_len = 1`) can cycle, and saturated values compare meaninglessly.
+- **witness(n)**: for every alternation node with finite `min_len`, the branch that achieves it by the **shortest derivation** — fewest steps, ties broken by branch index; for every repetition, the count `min`. Witnesses form a well-founded derivation: each names a node whose own `min_len` was settled before the node referring to it, so following witnesses from any productive node reaches terminals in finitely many steps. This is the generator's termination device (§6.8). Comparing `min_len` magnitudes is *not* a substitute: ties are ordinary — `a = b / "x"` with `b = "z" a / "y"` settles both rules at 1, and both branches of `a` at 1 — and saturated values compare meaninglessly, so the branch chosen would turn on an implementation accident rather than on the grammar. Ordering by derivation length also bounds the work: the chain followed is the shortest the grammar allows, not merely one that yields a shortest string.
 - **first-graph**: edge `A → B` iff `B` can be the first thing matched by `A`, i.e. `B` occurs in `A`'s body preceded only by nullable elements. The body of a repetition with `max == 0` can never match anything, so it contributes no edges; likewise it is excluded from `reaches_prose` and `reaches_unrepresentable`. (D18 guarantees `max == 0` implies `min == 0`; such a node is nullable with `min_len = Finite(0)`.) This is the analysis-side twin of the coverage rule in §6.8.
 
 **Prose values in analyses.** `<prose>` has no defined matching semantics, so its true nullability and length are unknown. For analysis purposes only, v1 assumes prose is **non-nullable with `min_len = 1`**. This is the safe assumption: it never creates a first-graph edge (so prose cannot cause a spurious global left-recursion failure), never makes a branch look unproductive (so no misleading `UnproductiveAlternative`), and the only rules whose analyses could be wrong under it are prose-reaching rules, which v1 refuses to recognize or generate from anyway (§6.5). Rules that do not reach prose have analyses independent of the assumption. Revisit when the resolver hook arrives.
@@ -398,7 +398,7 @@ Each milestone is a PR-sized unit. Do not start the next before the current one'
 - A test scans every file under `tests/grammars/` and fails on any non-ASCII byte (§4.2).
 - Round-trip at both layers: `Grammar::parse(g.to_string()) == g` and `Grammar::parse(cg.to_string()).check() == cg` for every valid fixture, including fixtures parsed with `strict_crlf = true`. `*1a` and `[a]` parse to equal grammars. Canonical spelling is unit-tested against the §6.7 table.
 - `lint()` and `lint_from()` produce the expected warnings on hand-written cases, including `UnproductiveRule` and `UnproductiveAlternative`; the RFC 8259 fixture yields exactly one `ShadowsCoreRule` warning, for `char` against the core rule `CHAR`, and no errors; the core-rules fixture yields sixteen and no errors.
-- Analyses (nullable, `min_len` and `witness` per node; `reaches_prose` and `reaches_unrepresentable` per rule) are unit-tested on hand-written grammars, including: a `min_len` that saturates (three nested `4294967295` repetitions) and is still `Finite`; a prose-containing rule that does *not* trigger left recursion or `UnproductiveAlternative`; and the tie case `a = b / "x"`, `b = a / "y"`, whose witnesses point at the terminals.
+- Analyses (nullable, `min_len` and `witness` per node; `reaches_prose` and `reaches_unrepresentable` per rule) are unit-tested on hand-written grammars, including: a `min_len` that saturates (three nested `4294967295` repetitions) and is still `Finite`; a prose-containing rule that does *not* trigger left recursion or `UnproductiveAlternative`; and the tie case `a = b / "x"`, `b = "z" a / "y"`, whose witnesses point at the terminals.
 - Node ids: two textually different grammars with the same canonical form yield identical node ids.
 - Acceptance is about parsing and checking only. Nothing in M1 recognizes input.
 
@@ -420,7 +420,7 @@ Each milestone is a PR-sized unit. Do not start the next before the current one'
 - `NoFiniteExpansion` returned immediately for an unproductive start rule; `ProseValueReachable` for a prose-reaching one. Random mode (`coverage = false`) on `start = "ok" / bad`, `bad = "x" bad` terminates on every one of 1000 seeds.
 - Zero-count repetition: on `start = *("a" / "b")` in coverage mode, both branches are covered in at most two calls; a hand-written grammar with a `*0(...)` body reports zero units inside it.
 - Self-generation: 500 strings generated from the canonical self-grammar's `rulelist`, in coverage mode, all parse with `Grammar::parse`. Together with M2's self-recognition this checks §4.2's invariant in both directions.
-- Witness termination: with `max_depth = 0`, generation from `a` in `a = b / "x"`, `b = a / "y"` terminates and yields `x` or `y`.
+- Witness termination: with `max_depth = 0`, generation from `a` in `a = b / "x"`, `b = "z" a / "y"` terminates and yields `x`, deterministically, because the witness of `a` is the branch with the shortest derivation (§6.4).
 - Resource bound: `start = 1000000000*"a"` returns `OutputLimit` under default options rather than running.
 - Determinism: two fresh generators with the same seed and options produce identical sequences over 100 calls.
 
@@ -481,7 +481,7 @@ Exit codes for `match`:
 
 ## 13. Decisions before M1 (normative)
 
-Each item traces to the review that motivated it (D1–D16 first review, D17–D24 second, D25–D31 third, D32–D37 implementation-planning questions, D38 implementation follow-up, D39 and D40 factual corrections caught while building the fixtures). Implement these as written.
+Each item traces to the review that motivated it (D1–D16 first review, D17–D24 second, D25–D31 third, D32–D37 implementation-planning questions, D38 implementation follow-up, D39 through D41 factual corrections caught while building the checker). Implement these as written.
 
 - **D1** A `Recognizer` or `Generator` can only be constructed from a `CheckedGrammar`. `Grammar::check` consumes the `Grammar`. There is no unchecked path.
 - **D2** A `Recognizer` is bound to one input at construction. The memo table lives inside it and is never reused across inputs.
@@ -523,6 +523,7 @@ Each item traces to the review that motivated it (D1–D16 first review, D17–D
 - **D38** The coverage guarantee is independent of `max_depth`. In coverage mode, witness mode engages only when `dist_to_uncovered` is `∞` at the current node; while it is finite the walk chases by strictly decreasing distance (ties by branch index), so the chase is bounded and deterministic. `max_steps` / `max_output_len` remain the hard backstops.
 - **D39** RFC 5234 has two verified errata and both are §4 grammar corrections: 2968 fixes `elements`, 3076 fixes `rulelist`. Revisions before 5.3 described 3076 as clarifying numeric-value concatenation, which it does not — that is base RFC 5234 §2.3 — and attributed the `rulelist` fix to 2968. The canonical self-grammar is RFC 5234 §4 + **both** errata + RFC 7405 §2.2; the parser implements both corrections.
 - **D40** No fixture RFC restates the core rules: RFC 9110 §5 includes them "by reference", and RFC 3986 defines none. Revisions before 5.5 justified `ShadowsCoreRule` by a verbatim restatement in those two documents, which does not exist. The decision is unchanged and the evidence is stronger: RFC 8259 defines `char`, unrelated to `CHAR = %x01-7F`, so shadowing must stay a lint or the JSON grammar would not check.
+- **D41** The witness of an alternation is the branch achieving its `min_len` by the shortest derivation, ties by branch index. Revisions before 5.6 defined it as "the branch that first attained the value during fixpoint iteration", which presumes an algorithm the implementation does not use and leaves the choice undetermined; and they illustrated the tie with `a = b / "x"`, `b = a / "y"`, which is left-recursive and so never reaches the analyses at all.
 
 ## 14. v2 candidates (explicitly not v1)
 
