@@ -1,10 +1,10 @@
-# Scoping document: `abnf-oracle` (revision 5.6)
+# Scoping document: `abnf-oracle` (revision 5.7)
 
 A small, correct, dependency-light Rust crate that parses ABNF grammars (RFC 5234, RFC 7405), recognizes whether an input matches a rule, and generates random inputs that match a rule. Built to be a **testing oracle**, not a production parser.
 
 Working crate name: `abnf-oracle` (rename freely; `abnf` on crates.io is taken by an unmaintained crate with a different scope).
 
-Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar; 5.4 completes §6.7's parenthesization rule, which covered two of the four cases that need parentheses; 5.5 corrects the claim that RFC 3986 and RFC 9110 restate the core rules, which neither does; 5.6 replaces the witness tie-case grammar, which was itself left-recursive and so could never be checked, and states the witness rule in terms of derivation length. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
+Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar; 5.4 completes §6.7's parenthesization rule, which covered two of the four cases that need parentheses; 5.5 corrects the claim that RFC 3986 and RFC 9110 restate the core rules, which neither does; 5.6 replaces the witness tie-case grammar, which was itself left-recursive and so could never be checked, and states the witness rule in terms of derivation length; 5.7 removes the whitespace from the §6.3 repetition table, where six of the twelve rows were spelled in a way ABNF does not admit. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
 
 ---
 
@@ -180,7 +180,7 @@ Memoization bounds each `(rule, input position)` evaluation to one computation p
 
 Bounds are validated before any of this runs: `min > max` (e.g. `5*2"a"`) is `CheckError::InvalidRepeatRange { min, max }`, and a descending numeric range (`%x5A-41`) is `CheckError::InvalidNumericRange { lo, hi }`. Both are structural errors; the recognizer may assume `min <= max` and `lo <= hi`.
 
-Revision 1's fixpoint cutoff was wrong for nullable elements with a positive minimum (`3*3 ["a"]` on empty input must accept). The corrected algorithm has two phases:
+Revision 1's fixpoint cutoff was wrong for nullable elements with a positive minimum (`3*3["a"]` on empty input must accept). The corrected algorithm has two phases:
 
 ```
 Repetition min..max of e  (max may be ∞):
@@ -210,18 +210,18 @@ Repetition min..max of e  (max may be ∞):
 
 Termination and cost. Phase 1's early exit is *equality* of the step result, not the subset test that was wrong in revision 1: the step `f(S) = ∪ match(e, p)` is deterministic, so `f(cur) == cur` implies every later iteration returns `cur` too. This bounds phase 1 regardless of how large `min` is (`1000000000*["a"]` on empty input must return promptly): for nullable `e`, `cur ⊆ f(cur)` so the sequence is monotone and stabilizes within input-length steps; for non-nullable `e`, every repetition consumes at least one scalar, so `cur` empties within input-length + 1 steps. Phase 2 strictly grows `result`, which is bounded by the input length, so it terminates even for `max = ∞`.
 
-Mandatory regression cases in `tests/repetition.rs`:
+Mandatory regression cases in `tests/repetition.rs`. Note the spelling: `repetition = [repeat] element` admits nothing between the bounds and what they repeat, so `3*3["a"]` is valid ABNF and `3*3 ["a"]` is not — a space there would need `repetition = [repeat] *c-wsp element`, which RFC 5234 does not say.
 
 | Grammar | Input | Expected |
 |---|---|---|
-| `3*3 ["a"]` | `` (empty) | accept |
-| `3*3 ["a"]` | `aa` | accept |
-| `3*3 ["a"]` | `aaaa` | reject |
-| `2*2 "a"` | `a` | reject |
+| `3*3["a"]` | `` (empty) | accept |
+| `3*3["a"]` | `aa` | accept |
+| `3*3["a"]` | `aaaa` | reject |
+| `2*2"a"` | `a` | reject |
 | `*["a"]` | `` | accept, terminates |
 | `1*("a" / "")` | `` | accept |
-| `2*4 "ab"` | `ababab` | accept |
-| `2*4 "ab"` | `ababababab` | reject |
+| `2*4"ab"` | `ababab` | accept |
+| `2*4"ab"` | `ababababab` | reject |
 | `1000000000*["a"]` | `` | accept, promptly (phase-1 early exit) |
 | `1000000000*"a"` | `aaa` | reject, promptly |
 | `5*2"a"` | — | `CheckError::InvalidRepeatRange` |
