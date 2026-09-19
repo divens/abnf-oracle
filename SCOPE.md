@@ -1,10 +1,10 @@
-# Scoping document: `abnf-oracle` (revision 5.7)
+# Scoping document: `abnf-oracle` (revision 5.8)
 
 A small, correct, dependency-light Rust crate that parses ABNF grammars (RFC 5234, RFC 7405), recognizes whether an input matches a rule, and generates random inputs that match a rule. Built to be a **testing oracle**, not a production parser.
 
 Working crate name: `abnf-oracle` (rename freely; `abnf` on crates.io is taken by an unmaintained crate with a different scope).
 
-Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar; 5.4 completes §6.7's parenthesization rule, which covered two of the four cases that need parentheses; 5.5 corrects the claim that RFC 3986 and RFC 9110 restate the core rules, which neither does; 5.6 replaces the witness tie-case grammar, which was itself left-recursive and so could never be checked, and states the witness rule in terms of derivation length; 5.7 removes the whitespace from the §6.3 repetition table, where six of the twelve rows were spelled in a way ABNF does not admit. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
+Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar; 5.4 completes §6.7's parenthesization rule, which covered two of the four cases that need parentheses; 5.5 corrects the claim that RFC 3986 and RFC 9110 restate the core rules, which neither does; 5.6 replaces the witness tie-case grammar, which was itself left-recursive and so could never be checked, and states the witness rule in terms of derivation length; 5.7 removes the whitespace from the §6.3 repetition table, where six of the twelve rows were spelled in a way ABNF does not admit; 5.8 adds `MatchOptions::max_depth`, after M2.4 found that deeply nested input overflowed the stack and aborted the process. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
 
 ---
 
@@ -175,6 +175,8 @@ accepts(rule, input) := input.len() ∈ match(rule, 0)
 ```
 
 Memoization bounds each `(rule, input position)` evaluation to one computation per recognition run. Pathological grammars may still be expensive; no complexity guarantee is claimed (performance is a non-goal). `MatchOptions::max_steps` provides an explicit resource limit; the default is unlimited. Exceeding it returns `MatchError::StepLimit`, never a silent reject.
+
+The recognizer descends recursively, so nesting in the *input* becomes depth on the call stack, and a stack overflow aborts the process rather than returning anything. `MatchOptions::max_depth` therefore bounds recursion and returns `MatchError::DepthLimit`. Unlike every other limit here its default is **finite**, because the failure it prevents cannot be caught and reported: an unlimited default would mean the safe behaviour is the one the caller has to opt into. Depth counts grammar nodes entered rather than input characters, so a flat input of any length costs nothing; the cost is about 2 KB of stack per level, which is what fixes the default. Raising the limit means giving the recognizer a larger stack to match.
 
 ### 6.3 Repetition
 
@@ -354,7 +356,8 @@ impl CheckedGrammar {
     pub fn can_recognize(&self, rule: &str) -> Result<(), MatchError>;   // compatibility check without input
 }
 
-pub struct MatchOptions { pub max_steps: Option<u64> }   // default: None (unlimited)
+pub struct MatchOptions { pub max_steps: Option<u64>,      // default: None (unlimited)
+                          pub max_depth: Option<usize> }   // default: Some(DEFAULT_MAX_DEPTH)
 
 /// Bound to exactly one input for its lifetime; the memo table is valid only for that input.
 pub struct Recognizer<'g, 'i> { /* &CheckedGrammar, &[char] input, memo, options */ }
@@ -380,7 +383,7 @@ impl<'g> Generator<'g> {
     pub fn steps(&self) -> u64;                       // node visits so far; the counter max_steps limits (mirrors Recognizer::steps)
 }
 
-pub enum MatchError { ProseValueReachable {..}, UnrepresentableTerminal {..}, UnknownRule(String), LeftRecursionDetected {..}, StepLimit }
+pub enum MatchError { ProseValueReachable {..}, UnrepresentableTerminal {..}, UnknownRule(String), LeftRecursionDetected {..}, StepLimit, DepthLimit }
 pub enum GenError   { ProseValueReachable {..}, UnrepresentableTerminal {..}, UnknownRule(String), NoFiniteExpansion {..}, OutputLimit, StepLimit }
 ```
 
@@ -481,7 +484,7 @@ Exit codes for `match`:
 
 ## 13. Decisions before M1 (normative)
 
-Each item traces to the review that motivated it (D1–D16 first review, D17–D24 second, D25–D31 third, D32–D37 implementation-planning questions, D38 implementation follow-up, D39 through D41 factual corrections caught while building the checker). Implement these as written.
+Each item traces to the review that motivated it (D1–D16 first review, D17–D24 second, D25–D31 third, D32–D37 implementation-planning questions, D38 implementation follow-up, D39 through D42 caught while building the checker and recognizer). Implement these as written.
 
 - **D1** A `Recognizer` or `Generator` can only be constructed from a `CheckedGrammar`. `Grammar::check` consumes the `Grammar`. There is no unchecked path.
 - **D2** A `Recognizer` is bound to one input at construction. The memo table lives inside it and is never reused across inputs.
@@ -524,6 +527,7 @@ Each item traces to the review that motivated it (D1–D16 first review, D17–D
 - **D39** RFC 5234 has two verified errata and both are §4 grammar corrections: 2968 fixes `elements`, 3076 fixes `rulelist`. Revisions before 5.3 described 3076 as clarifying numeric-value concatenation, which it does not — that is base RFC 5234 §2.3 — and attributed the `rulelist` fix to 2968. The canonical self-grammar is RFC 5234 §4 + **both** errata + RFC 7405 §2.2; the parser implements both corrections.
 - **D40** No fixture RFC restates the core rules: RFC 9110 §5 includes them "by reference", and RFC 3986 defines none. Revisions before 5.5 justified `ShadowsCoreRule` by a verbatim restatement in those two documents, which does not exist. The decision is unchanged and the evidence is stronger: RFC 8259 defines `char`, unrelated to `CHAR = %x01-7F`, so shadowing must stay a lint or the JSON grammar would not check.
 - **D41** The witness of an alternation is the branch achieving its `min_len` by the shortest derivation, ties by branch index. Revisions before 5.6 defined it as "the branch that first attained the value during fixpoint iteration", which presumes an algorithm the implementation does not use and leaves the choice undetermined; and they illustrated the tie with `a = b / "x"`, `b = a / "y"`, which is left-recursive and so never reaches the analyses at all.
+- **D42** Recursion depth is bounded by `MatchOptions::max_depth`, whose default is finite — the only limit in this crate that is. Exceeding the stack aborts the process, which no caller can catch or report as "could not decide", so the safe behaviour cannot be the opt-in one. Exceeding the limit is `MatchError::DepthLimit`, never a rejection. Measured during M2.4: about 2 KB of stack per level of depth, so the default is set to be safe on a 1 MB stack.
 
 ## 14. v2 candidates (explicitly not v1)
 
