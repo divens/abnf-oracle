@@ -45,3 +45,4 @@ pub use ast::{
 };
 pub use check::CheckedGrammar;
 pub use error::{CheckError, GenError, LintWarning, MatchError, ParseError};
+pub use recognize::{MatchOptions, Recognizer};
