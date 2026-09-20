@@ -41,6 +41,13 @@ jobs:
       # The generator round-trip samples seeds and caps output length by default, so that a
       # local `cargo test` stays quick. CI runs what M3 actually asks for: 200 seeds per rule,
       # with no cap on how long a generated string may get.
+      # The declared MSRV is a promise, and an unchecked promise drifts. This caught the
+      # opposite problem in M4.3: the crate claimed 1.97 and actually built on 1.88.
+      - name: Install MSRV toolchain
+        run: rustup toolchain install 1.88.0 --profile minimal
+      - name: Build and test on the MSRV
+        run: cargo +1.88.0 test --features cli
+
       - name: Test (default features)
         env:
           ABNF_ORACLE_SEEDS: 200

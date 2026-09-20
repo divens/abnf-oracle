@@ -2,13 +2,29 @@
 name = "abnf-oracle"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.88"
 description = "Parse ABNF grammars (RFC 5234, RFC 7405), recognize whether input matches a rule, and generate matching inputs. Built as a testing oracle."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 keywords = ["abnf", "rfc5234", "grammar", "recognizer", "testing"]
 categories = ["parser-implementations", "development-tools::testing"]
-exclude = ["/SCOPE.md", "/PLAN.md", "/.github", "/scripts"]
+repository = "https://github.com/divens/abnf-oracle"
+documentation = "https://docs.rs/abnf-oracle"
+
+# Ship what makes the crate's claims checkable from the tarball alone. The source cites
+# SCOPE.md 159 times by decision number, `scripts/extract-fixtures.py` regenerates the fixtures
+# the shipped tests run against, and PLAN.md's risk register is cited by name in five places.
+# None of it reaches docs.rs, which renders only the README and the rustdoc, so the cost is
+# 164 KB in a source tarball read by exactly the people it helps.
+#
+# CI config is the exception: it describes how *this repository* is built, which a consumer
+# cannot act on. The built Go binary is gitignored and so never packaged.
+exclude = ["/.github"]
+
+# docs.rs builds with default features unless told otherwise. Nothing in the library is gated
+# today, but saying so keeps the docs complete if that ever changes.
+[package.metadata.docs.rs]
+all-features = true
 
 [features]
 default = []

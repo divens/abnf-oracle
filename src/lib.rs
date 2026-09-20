@@ -20,10 +20,43 @@
 //!    way to recognize against a grammar whose structure was never validated.
 //! 3. `Recognizer` / `Generator` — bound to a checked grammar and a start rule.
 //!
-//! # Status
+//! # Example
 //!
-//! Under construction. M0 (skeleton and data model) is in place; parsing, checking, recognition
-//! and generation land in M1–M3. See `PLAN.md`.
+//! ```
+//! use abnf_oracle::{Generator, Grammar, Recognizer};
+//!
+//! // A grammar, as it would appear in an RFC.
+//! let source = concat!(
+//!     "full-date     = date-fullyear \"-\" date-month \"-\" date-mday\r\n",
+//!     "date-fullyear = 4DIGIT\r\n",
+//!     "date-month    = 2DIGIT\r\n",
+//!     "date-mday     = 2DIGIT\r\n",
+//! );
+//!
+//! // Parse, then check. `check` merges incremental definitions, resolves every name and runs
+//! // the analyses; it is the only way to reach a recognizer or a generator.
+//! let grammar = Grammar::parse(source)
+//!     .expect("valid ABNF")
+//!     .check()
+//!     .expect("no structural errors");
+//!
+//! // Recognize.
+//! assert!(Recognizer::new(&grammar, "2026-09-20").accepts("full-date").unwrap());
+//! assert!(!Recognizer::new(&grammar, "20260920").accepts("full-date").unwrap());
+//!
+//! // Generate. The same seed always gives the same string.
+//! let mut generator = Generator::new(&grammar, 42);
+//! let produced = generator.generate("full-date").expect("generates");
+//!
+//! // What the generator produces, the recognizer accepts.
+//! assert!(Recognizer::new(&grammar, &produced).accepts("full-date").unwrap());
+//! ```
+//!
+//! # Errors are not rejections
+//!
+//! A limit, a prose value or an unrepresentable terminal makes a question *unanswerable*, which
+//! is different from answering "no". Every such case is an `Err`, never `Ok(false)`, so a
+//! caller can never mistake "could not decide" for "does not match".
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

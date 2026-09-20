@@ -16,8 +16,10 @@
 //! enforced per start rule; lint warnings never fail a check (SCOPE.md 6.6, D5). Errors
 //! accumulate: a grammar with four undefined references reports four, not the first.
 //!
-//! M1.5 through M1.7 add the analyses — representability, `nullable`, `min_len` with its
-//! witness, the first-graph and its cycles, and the per-rule prose and representability flags.
+//! Checking also runs the analyses the rest of the crate depends on: representability,
+//! `nullable`, `min_len` with its witness, the first-graph and its cycles, and the per-rule
+//! prose and representability flags. They are computed once, here, so neither the recognizer
+//! nor the generator can observe a grammar whose properties were never established.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;

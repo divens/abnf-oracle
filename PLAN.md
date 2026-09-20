@@ -4,7 +4,9 @@ Companion to `SCOPE.md` (revision 5.2). SCOPE.md is normative on *what* is built
 this document is *how*, *in what order*, and *what still needs attention*.
 
 Status at time of writing: empty repository, no commits, `SCOPE.md` only.
-Toolchain present: rustc/cargo 1.97.1 (edition 2024 available, MSRV target = 1.97).
+Toolchain present: rustc/cargo 1.97.1 (edition 2024 available). MSRV is **1.88**, measured in
+M4.3 rather than assumed: the crate was developed on 1.97 and declared that, but the oldest
+feature it actually uses is let-chains under edition 2024, and the whole suite passes on 1.88.
 
 Revision 5 settled D32–D37; 5.1 settled D38; 5.2 corrected the three M3 acceptance criteria this
 plan flagged. Spec and plan now agree on every normative point: §2 records what 5.1 and 5.2
@@ -720,7 +722,7 @@ authority is setting `preserve_case` on the chase test (§2.1).
 | PR | Contents |
 |---|---|
 | **4.1–4.2** | `scripts/differential.py` driving **two** implementations — python-abnf 2.9.0 and go-abnf v0.5.1 (through `scripts/goharness`, a thin Go program using this crate's exit-code convention) — in three directions: we generate/they accept, they generate/we accept, and a shared corpus. `scripts/DIFFERENTIAL.md` records the run. **Found a real bug in go-abnf**: an alternation whose first branch carries `%s` is treated as case-sensitive throughout |
-| **4.3** | README (20-line example plus an explicit "what this is not"), docs pass, crates.io metadata, release |
+| **4.3** | README rewritten around the crate-level doctest (so the shown example is the compiled one), `repository`/`documentation` metadata, links to excluded files made absolute, stale milestone language removed from shipped docs, `rng.rs`'s `allow(dead_code)` dropped. `cargo package`: 373 files, 131.5 KiB compressed |
 
 Every disagreement found here becomes a corpus file *before* it becomes a fix (§9).
 

@@ -16,7 +16,9 @@
 //! no shorter expansion, so the walk terminates and would still produce a gigabyte;
 //! [`GenOptions::max_output_len`] is what makes that an error instead.
 //!
-//! Coverage mode lands in M3.2.
+//! Coverage mode ([`GenOptions::coverage`]) steers towards branches not yet taken, with a
+//! guarantee rather than a probability: while any reachable branch is untaken, each successful
+//! call takes at least one.
 
 use std::collections::{HashMap, VecDeque};
 

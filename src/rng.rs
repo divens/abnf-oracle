@@ -8,10 +8,6 @@
 //! The determinism contract is per crate version (D15), but the stream is locked by the test
 //! vectors below so that a refactor cannot change it by accident.
 
-// The generator is the only consumer and does not exist until M3.1. Remove this when
-// `generate.rs` lands.
-#![allow(dead_code)]
-
 /// A SplitMix64 generator.
 ///
 /// Deterministic from its seed, with a period of 2^64 and no correlation between nearby seeds
