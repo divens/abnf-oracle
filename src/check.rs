@@ -32,7 +32,7 @@ use crate::ast::{
     Span, Witness,
 };
 use crate::core_rules;
-use crate::error::{CheckError, GenError, MatchError};
+use crate::error::{CheckError, CheckErrors, GenError, MatchError};
 
 /// A grammar that passed structural validation.
 ///
@@ -70,7 +70,7 @@ impl Grammar {
     /// # Errors
     ///
     /// Returns every [`CheckError`] found, not just the first.
-    pub fn check(self) -> Result<CheckedGrammar, Vec<CheckError>> {
+    pub fn check(self) -> Result<CheckedGrammar, CheckErrors> {
         let mut errors = Vec::new();
         let merged = merge(self, &mut errors);
 
@@ -82,7 +82,7 @@ impl Grammar {
         if !errors.is_empty() {
             // Stop here: with a name unresolved or a range inverted, the first-graph is
             // incomplete and any cycle it reported would be guesswork.
-            return Err(errors);
+            return Err(errors.into());
         }
         builder.finish(merged.len())
     }
@@ -490,7 +490,7 @@ impl Builder {
         }
     }
 
-    fn finish(self, user_rules: usize) -> Result<CheckedGrammar, Vec<CheckError>> {
+    fn finish(self, user_rules: usize) -> Result<CheckedGrammar, CheckErrors> {
         let analysis = Analysis {
             rules: &self.rules,
             user_rules,
@@ -503,7 +503,7 @@ impl Builder {
         // can be first.
         let errors = analysis.left_recursion(&nullable);
         if !errors.is_empty() {
-            return Err(errors);
+            return Err(errors.into());
         }
 
         let (min_len, witness) = analysis.min_len();
@@ -1070,7 +1070,7 @@ mod tests {
             .unwrap_or_else(|errors| panic!("{src:?} should check: {errors:?}"))
     }
 
-    fn errors(src: &str) -> Vec<CheckError> {
+    fn errors(src: &str) -> CheckErrors {
         Grammar::parse(src)
             .unwrap_or_else(|e| panic!("{src:?} should parse: {e}"))
             .check()

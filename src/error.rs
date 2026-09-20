@@ -220,6 +220,127 @@ impl CheckError {
 
 impl std::error::Error for CheckError {}
 
+/// Every structural problem found by [`crate::Grammar::check`], in the order found.
+///
+/// A newtype rather than a bare `Vec<CheckError>` so that it can implement [`std::error::Error`]
+/// — `Vec` is a foreign type, so it never could, and callers were forced to handle this one
+/// error specially instead of writing `?` like everywhere else.
+///
+/// It behaves like a slice of [`CheckError`] for every purpose except that:
+///
+/// ```
+/// use abnf_oracle::Grammar;
+///
+/// fn load(source: &str) -> Result<(), Box<dyn std::error::Error>> {
+///     let grammar = Grammar::parse(source)?.check()?;
+///     let _ = grammar;
+///     Ok(())
+/// }
+///
+/// // Four undefined references are four errors, not the first one four times.
+/// let broken = "start = a b c d\r\n";
+/// let errors = Grammar::parse(broken).unwrap().check().unwrap_err();
+/// assert_eq!(errors.len(), 4);
+/// for error in &errors {
+///     assert!(error.span().is_some());
+/// }
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckErrors(Vec<CheckError>);
+
+impl CheckErrors {
+    /// The errors, as a slice.
+    #[must_use]
+    pub fn as_slice(&self) -> &[CheckError] {
+        &self.0
+    }
+
+    /// Takes the errors out.
+    #[must_use]
+    pub fn into_vec(self) -> Vec<CheckError> {
+        self.0
+    }
+
+    /// Renders every error against the grammar text, one per line, with a closing count.
+    ///
+    /// This is what a grammar author wants to read: all of them at once, so a grammar with four
+    /// undefined references takes one round of fixing rather than four.
+    #[must_use]
+    pub fn render(&self, src: &str) -> String {
+        let mut out = String::new();
+        for error in &self.0 {
+            out.push_str(&error.render(src));
+            out.push('\n');
+        }
+        let count = self.0.len();
+        out.push_str(&format!(
+            "{count} structural {}",
+            if count == 1 { "error" } else { "errors" }
+        ));
+        out
+    }
+}
+
+impl core::ops::Deref for CheckErrors {
+    type Target = [CheckError];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl From<Vec<CheckError>> for CheckErrors {
+    fn from(errors: Vec<CheckError>) -> Self {
+        Self(errors)
+    }
+}
+
+impl From<CheckErrors> for Vec<CheckError> {
+    fn from(errors: CheckErrors) -> Self {
+        errors.0
+    }
+}
+
+impl IntoIterator for CheckErrors {
+    type Item = CheckError;
+    type IntoIter = std::vec::IntoIter<CheckError>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a CheckErrors {
+    type Item = &'a CheckError;
+    type IntoIter = core::slice::Iter<'a, CheckError>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl fmt::Display for CheckErrors {
+    /// One error reads as itself; several are counted and then listed.
+    ///
+    /// No source text is available here, so there are no carets — [`CheckErrors::render`] is
+    /// the one to use when the grammar text is at hand.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0.as_slice() {
+            [] => f.write_str("no structural errors"),
+            [only] => write!(f, "{only}"),
+            many => {
+                write!(f, "{} structural errors:", many.len())?;
+                for error in many {
+                    write!(f, "\n  {error}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for CheckErrors {}
+
 /// An advisory warning. Never fails `check` (D5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -471,5 +592,86 @@ mod tests {
             assert_eq!(error.span(), span);
             assert!(!error.to_string().is_empty());
         }
+    }
+
+    // -- CheckErrors ---------------------------------------------------------------------
+
+    fn check_errors(src: &str) -> CheckErrors {
+        crate::ast::Grammar::parse(src)
+            .expect("parses")
+            .check()
+            .expect_err("should not check")
+    }
+
+    #[test]
+    fn check_errors_is_a_std_error() {
+        // The reason the newtype exists: `Vec` is foreign, so it can never implement `Error`,
+        // and every caller had to handle this one error specially instead of writing `?`.
+        fn takes_std_error(_: &dyn std::error::Error) {}
+        takes_std_error(&check_errors("start = missing\r\n"));
+    }
+
+    #[test]
+    fn check_errors_behaves_like_a_slice() {
+        let errors = check_errors("start = a b c\r\n");
+        assert_eq!(errors.len(), 3);
+        assert!(!errors.is_empty());
+        assert_eq!(errors.iter().count(), 3);
+        assert!(matches!(errors[0], CheckError::UndefinedRule { .. }));
+        assert_eq!(errors.as_slice().len(), 3);
+    }
+
+    #[test]
+    fn check_errors_iterates_by_value_and_by_reference() {
+        let errors = check_errors("start = a b\r\n");
+        assert_eq!((&errors).into_iter().count(), 2);
+        assert_eq!(errors.into_iter().count(), 2);
+    }
+
+    #[test]
+    fn check_errors_converts_both_ways() {
+        let errors = check_errors("start = a b\r\n");
+        let as_vec: Vec<CheckError> = errors.clone().into();
+        assert_eq!(as_vec.len(), 2);
+        assert_eq!(CheckErrors::from(as_vec.clone()), errors);
+        assert_eq!(errors.into_vec(), as_vec);
+    }
+
+    #[test]
+    fn one_error_displays_as_itself() {
+        let errors = check_errors("start = missing\r\n");
+        assert_eq!(errors.to_string(), errors[0].to_string());
+        assert!(!errors.to_string().contains("structural errors"));
+    }
+
+    #[test]
+    fn several_errors_are_counted_then_listed() {
+        let errors = check_errors("start = a b c\r\n");
+        let shown = errors.to_string();
+        assert!(shown.starts_with("3 structural errors:"), "{shown}");
+        for error in &errors {
+            assert!(shown.contains(&error.to_string()), "{shown}");
+        }
+    }
+
+    #[test]
+    fn render_shows_every_error_against_the_source() {
+        // A grammar with four undefined references should take one round of fixing, not four.
+        let src = "start = a b c d\r\n";
+        let rendered = check_errors(src).render(src);
+
+        assert_eq!(rendered.matches("undefined rule").count(), 4);
+        assert!(rendered.contains('^'), "with carets: {rendered}");
+        assert!(rendered.ends_with("4 structural errors"), "{rendered}");
+    }
+
+    #[test]
+    fn render_says_error_in_the_singular() {
+        let src = "start = missing\r\n";
+        assert!(
+            check_errors(src)
+                .render(src)
+                .ends_with("1 structural error")
+        );
     }
 }

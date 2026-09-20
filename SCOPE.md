@@ -1,10 +1,10 @@
-# Scoping document: `abnf-oracle` (revision 5.8)
+# Scoping document: `abnf-oracle` (revision 5.9)
 
 A small, correct, dependency-light Rust crate that parses ABNF grammars (RFC 5234, RFC 7405), recognizes whether an input matches a rule, and generates random inputs that match a rule. Built to be a **testing oracle**, not a production parser.
 
 Working crate name: `abnf-oracle` (rename freely; `abnf` on crates.io is taken by an unmaintained crate with a different scope).
 
-Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar; 5.4 completes §6.7's parenthesization rule, which covered two of the four cases that need parentheses; 5.5 corrects the claim that RFC 3986 and RFC 9110 restate the core rules, which neither does; 5.6 replaces the witness tie-case grammar, which was itself left-recursive and so could never be checked, and states the witness rule in terms of derivation length; 5.7 removes the whitespace from the §6.3 repetition table, where six of the twelve rows were spelled in a way ABNF does not admit; 5.8 adds `MatchOptions::max_depth`, after M2.4 found that deeply nested input overflowed the stack and aborted the process. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
+Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar; 5.4 completes §6.7's parenthesization rule, which covered two of the four cases that need parentheses; 5.5 corrects the claim that RFC 3986 and RFC 9110 restate the core rules, which neither does; 5.6 replaces the witness tie-case grammar, which was itself left-recursive and so could never be checked, and states the witness rule in terms of derivation length; 5.7 removes the whitespace from the §6.3 repetition table, where six of the twelve rows were spelled in a way ABNF does not admit; 5.8 adds `MatchOptions::max_depth`, after M2.4 found that deeply nested input overflowed the stack and aborted the process; 5.9 wraps `check`'s errors in a `CheckErrors` newtype, because `Vec` is a foreign type and so can never implement `std::error::Error`, which forced every caller to handle this one error specially instead of using `?`. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
 
 ---
 
@@ -341,7 +341,7 @@ impl Grammar {
     pub fn parse(src: &str) -> Result<Grammar, ParseError>;               // core rules implicit
     pub fn parse_with(src: &str, opts: ParseOptions) -> Result<Grammar, ParseError>;
     pub fn parse_options(&self) -> &ParseOptions;                         // provenance; not part of PartialEq
-    pub fn check(self) -> Result<CheckedGrammar, Vec<CheckError>>;        // consumes; merges =/, resolves names, assigns ids, runs analyses; structural errors only
+    pub fn check(self) -> Result<CheckedGrammar, CheckErrors>;        // consumes; merges =/, resolves names, assigns ids, runs analyses; structural errors only
 }
 
 /// A grammar that passed structural validation. The only route to a Recognizer or Generator.
@@ -528,6 +528,7 @@ Each item traces to the review that motivated it (D1–D16 first review, D17–D
 - **D40** No fixture RFC restates the core rules: RFC 9110 §5 includes them "by reference", and RFC 3986 defines none. Revisions before 5.5 justified `ShadowsCoreRule` by a verbatim restatement in those two documents, which does not exist. The decision is unchanged and the evidence is stronger: RFC 8259 defines `char`, unrelated to `CHAR = %x01-7F`, so shadowing must stay a lint or the JSON grammar would not check.
 - **D41** The witness of an alternation is the branch achieving its `min_len` by the shortest derivation, ties by branch index. Revisions before 5.6 defined it as "the branch that first attained the value during fixpoint iteration", which presumes an algorithm the implementation does not use and leaves the choice undetermined; and they illustrated the tie with `a = b / "x"`, `b = a / "y"`, which is left-recursive and so never reaches the analyses at all.
 - **D42** Recursion depth is bounded by `MatchOptions::max_depth`, whose default is finite — the only limit in this crate that is. Exceeding the stack aborts the process, which no caller can catch or report as "could not decide", so the safe behaviour cannot be the opt-in one. Exceeding the limit is `MatchError::DepthLimit`, never a rejection. Measured during M2.4: about 2 KB of stack per level of depth, so the default is set to be safe on a 1 MB stack.
+- **D43** `Grammar::check` returns `CheckErrors`, a newtype over `Vec<CheckError>`, rather than the `Vec` itself. The orphan rule makes `impl Error for Vec<CheckError>` impossible, so the bare `Vec` could not flow through `?` and made this the one error in the crate needing special handling. The newtype derefs to `[CheckError]` and iterates by value and by reference, so it reads as the collection it is, and adds `render(src)` for the all-errors-at-once output the CLI already produced by hand.
 
 ## 14. v2 candidates (explicitly not v1)
 

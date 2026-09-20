@@ -743,6 +743,23 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 | R9 | Memo clone cost making the JSON corpus slow enough to annoy. **Surfaced in M3.1, in the tests rather than the corpus**: verifying a multi-kilobyte generated string is superlinear in its length, so the uncapped sweep took 53s where the capped one takes 8. | Still accepted for v1 — performance is a non-goal and the cap is a test-side knob, not a library limit. The sweep caps output by default and CI runs it uncapped, so nothing goes unverified. Revisit with measurements after M4. |
 | R10 | A bug in the chase degrades into a walk bounded only by `max_steps` — slow and hard to diagnose. | Debug assertion `dist[chosen] < dist[current]` on every chase step (§4.4), so the invariant fails loudly in tests rather than quietly in the field. |
 
+### 6.6 The one API wart, found by writing the README (M4.3)
+
+`check` returned `Result<_, Vec<CheckError>>`. That looked fine until the README example needed
+`?` and would not compile: `Vec` is a foreign type, so `impl Error for Vec<CheckError>` is
+barred by the orphan rule, and this was the only error in the crate a caller could not treat
+like any other.
+
+Fixed before publishing rather than after, because the version that carries it would have been
+permanent on crates.io. `CheckErrors` derefs to `[CheckError]` and iterates both ways, so the
+CLI needed no changes at all — and `render(src)` moved the all-errors-with-carets output from
+the CLI into the library, where callers other than the CLI can reach it.
+
+Worth noting what the change cost in our own tree: exactly one line, a test helper annotated
+`-> Vec<CheckError>`. That is the shape of the breakage for downstream users too — only
+explicit type annotations, not ordinary use — which is why it would have been a gentle 0.2.0
+had it shipped. Doing it first was still cheaper.
+
 ### 6.5 What differential testing actually found (M4)
 
 **A real bug in go-abnf v0.5.1**, which is the outcome this milestone exists for. An alternation

@@ -201,14 +201,7 @@ fn load(path: &Path) -> Result<Option<(String, CheckedGrammar)>> {
         Err(errors) => {
             // Every error, not the first: a grammar with four undefined references should take
             // one round of fixing, not four.
-            for error in &errors {
-                eprintln!("{}", error.render(&src));
-            }
-            eprintln!(
-                "{} structural {}",
-                errors.len(),
-                plural(errors.len(), "error", "errors")
-            );
+            eprintln!("{}", errors.render(&src));
             Ok(None)
         }
     }

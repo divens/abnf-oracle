@@ -77,7 +77,7 @@ pub use ast::{
     ParseOptions, Repeat, Rule, RuleId, RuleName, Span, Witness,
 };
 pub use check::CheckedGrammar;
-pub use error::{CheckError, GenError, LintWarning, MatchError, ParseError};
+pub use error::{CheckError, CheckErrors, GenError, LintWarning, MatchError, ParseError};
 pub use generate::{
     DEFAULT_GEN_DEPTH, DEFAULT_MAX_OUTPUT_LEN, DEFAULT_MAX_STEPS, DEFAULT_SPREAD, GenOptions,
     Generator,
