@@ -694,7 +694,7 @@ JSONTestSuite is MIT-licensed: vendor `test_parsing/` only, with its `LICENSE` a
 
 | PR | Contents | Done when |
 |---|---|---|
-| **3.1** | `generate.rs`: walk, terminals, ranges, case variation, `preserve_case`, depth budget, witness mode, limits, `steps()` (§7) | `generate_roundtrip.rs`: every fixture × 200 seeds accepted by the recognizer, zero failures |
+| **3.1** | `generate.rs`: walk, terminals, ranges, case variation, `preserve_case`, depth budget, witness mode, limits, `steps()` (§7); `CheckedGrammar::can_generate` | **83,200 round-trips — every generatable rule of every fixture × 200 seeds — zero failures and zero limit hits.** The sweep samples seeds and caps output by default so a local `cargo test` stays under 10s; CI runs it in full and uncapped |
 | **3.2** | Generatable graph, unit enumeration, `dist_to_uncovered`, the chase, coverage-aware repetition counts, commit-on-success (§3.7, §4.4) | the exact bound holds on RFC 8259 and on a grammar with an unproductive alternative; depth-independence case (5-deep chain at `max_depth = 2`); chase determinism on `a = b / c`, `b = "z" a`, `c = "x" / "y"` with `preserve_case` (§2.1); nested units not counted (`uncovered(start) == 2`); `*("a" / "b")` covers both in ≤ 2 calls; a `*0(…)` body reports zero units |
 | **3.3** | Self-generation test (§4.5, D35) | 500 generated `rulelist` strings all parse |
 | **3.4** | Determinism and resource-bound tests; `uncovered()`; CLI `gen` | 100-call identical sequences; `1000000000*"a"` → `OutputLimit`; the `max_depth = 0` witness case; random mode terminates on 1000 seeds |
@@ -726,8 +726,20 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 | R6 | ~~Errata 2968 / 3076 wording taken from memory rather than the errata page.~~ **Fired, and was caught in M1.1.** SCOPE rev 5.2 had the two errata's subjects transposed and treated 3076 as a numeric-value clarification, which would have left `rulelist` ambiguous in the canonical fixture. | Fixed in SCOPE rev 5.3 / D39. The mitigation stands for PR 1.3: paste the corrected productions into each fixture header, from the errata page, never from memory. |
 | R7 | **Line-budget pressure** (~3,500 lines, §15). The two-layer split added a representation and a lowering pass; D38 added the generatable graph and the BFS; M1.2 added `display.rs`. | One printer for both layers (§3.10); check at each milestone with `tokei`. If it overruns, the honest first cut is terser `Display` impls in `error.rs`, not a required behaviour. |
 | R8 | The ASCII-cleanliness scan and the deliberately non-ASCII invalid fixture contradict each other. | Scope the scan to exclude `tests/grammars/invalid/parse/` (PR 1.1 / 1.3). Small, but it will fail CI on the day the fixture lands if nobody planned for it. |
-| R9 | Memo clone cost making the JSON corpus slow enough to annoy. | Accept until M4; run corpus tests in `--release`; only then consider borrowed sets. |
+| R9 | Memo clone cost making the JSON corpus slow enough to annoy. **Surfaced in M3.1, in the tests rather than the corpus**: verifying a multi-kilobyte generated string is superlinear in its length, so the uncapped sweep took 53s where the capped one takes 8. | Still accepted for v1 — performance is a non-goal and the cap is a test-side knob, not a library limit. The sweep caps output by default and CI runs it uncapped, so nothing goes unverified. Revisit with measurements after M4. |
 | R10 | A bug in the chase degrades into a walk bounded only by `max_steps` — slow and hard to diagnose. | Debug assertion `dist[chosen] < dist[current]` on every chase step (§4.4), so the invariant fails loudly in tests rather than quietly in the field. |
+
+### 6.2 A quadratic output-limit check (found in M3.1)
+
+`Generator::push` checked the output limit with `out.chars().count()`, which walks the whole
+buffer — so filling it was O(n²) and `start = 1000000000*"a"` took **38 seconds** to report
+`OutputLimit` against a default limit of 2²⁰. Counting emitted scalars instead made it
+instantaneous and cut the generator test suite from 31s to 4s.
+
+Worth recording for two reasons. It is exactly the class of bug the resource limits exist to
+prevent, hiding *inside* the limit check itself. And it was found by profiling rather than by a
+failing test: every test passed throughout, just slowly. The lesson for M3.2 is that a test
+suite getting slower is evidence, not an inconvenience.
 
 ### 6.1 The depth limit R1 uncovered
 

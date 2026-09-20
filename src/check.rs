@@ -30,7 +30,7 @@ use crate::ast::{
     Span, Witness,
 };
 use crate::core_rules;
-use crate::error::{CheckError, MatchError};
+use crate::error::{CheckError, GenError, MatchError};
 
 /// A grammar that passed structural validation.
 ///
@@ -190,6 +190,32 @@ impl CheckedGrammar {
             });
         }
         Ok(())
+    }
+
+    /// Whether `rule` can be used as a start rule for generation.
+    ///
+    /// The same limits as [`CheckedGrammar::can_recognize`] and for the same reasons: a prose
+    /// value has no defined expansion any more than it has defined matching semantics, and a
+    /// terminal with no representable scalar cannot be emitted. Reported as a [`GenError`]
+    /// because the caller is generating, not matching.
+    ///
+    /// # Errors
+    ///
+    /// [`GenError::UnknownRule`] if no such rule exists, or the compatibility limit that
+    /// applies. Note that an *unproductive* rule is not refused here: that is
+    /// [`GenError::NoFiniteExpansion`], which the generator raises.
+    pub fn can_generate(&self, rule: &str) -> Result<(), GenError> {
+        self.can_recognize(rule).map_err(|error| match error {
+            MatchError::ProseValueReachable { rule, prose } => {
+                GenError::ProseValueReachable { rule, prose }
+            }
+            MatchError::UnrepresentableTerminal { rule, terminal } => {
+                GenError::UnrepresentableTerminal { rule, terminal }
+            }
+            MatchError::UnknownRule(name) => GenError::UnknownRule(name),
+            // `can_recognize` reports only the three above.
+            other => unreachable!("unexpected compatibility error: {other}"),
+        })
     }
 
     /// How many rules the user's grammar defines.
