@@ -685,7 +685,7 @@ subdirectory.
 | **2.4** | Corpus harness, JSONTestSuite import, `NOTES.md`, `PROVENANCE.md` | all 95 `y_` accepted and all 174 decodable `n_` rejected — no disagreement with the suite at all; 12 `n_` moved to `indeterminate/` for invalid UTF-8 and 2 for depth, each listed in `NOTES.md` |
 | **2.5** | `tests/self_definition.rs` (D23); the two `invalid/parse/` fixtures and an RFC 7405 fixture, both gaps left by M1 | the canonical self-grammar accepts every fixture, including itself and one using `%s`/`%i`; rejects ten negative controls the parser also rejects; and the one documented divergence — a 25-digit repeat, valid ABNF that `u64` refuses — is pinned from both sides |
 | **2.6** | Brute-force enumerator + proptest (§4.3); memo-off equivalence test | property tests green at the default case count, with 72% of generated grammars surviving `check`; **validated by mutation** — reintroducing revision 1's subset bug fails the property test and passes all twelve mandatory rows |
-| **2.7** | Compatibility limits end to end; CLI `match` with §11 exit codes, incl. invalid UTF-8 → exit 2 (D14) | the prose fixture errors from a reaching start rule and returns `Ok` from a non-reaching one |
+| **2.7** | CLI `match` with §11's exit codes, `--input` / `--file` / `--dir`, `--max-steps` / `--max-depth` | all six exit-code rows asserted against the real corpus: 95 accepts → 0, 174 rejects → 1, the mixed directory → 2 with errors dominating; invalid UTF-8 → 2 (D14); a prose-reaching start rule → 2 before any input is read |
 
 JSONTestSuite is MIT-licensed: vendor `test_parsing/` only, with its `LICENSE` and a
 `PROVENANCE.md` naming the imported commit.

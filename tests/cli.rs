@@ -8,6 +8,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+/// Deliberately broken fixtures.
+const INVALID: &str = "invalid";
+
 /// The question was answered; the grammar is usable.
 const OK: i32 = 0;
 /// The question could not be answered at all.
@@ -181,16 +184,293 @@ fn a_missing_file_is_an_error() {
 }
 
 #[test]
-fn the_unimplemented_subcommands_say_so_rather_than_pretending() {
-    for (subcommand, milestone) in [("match", "M2.7"), ("gen", "M3.4")] {
-        let file = grammars().join("rfc3339-datetime.abnf");
+fn the_unimplemented_subcommand_says_so_rather_than_pretending() {
+    let file = grammars().join("rfc3339-datetime.abnf");
+    let output = run(&[
+        "gen",
+        file.to_str().expect("utf-8 path"),
+        "--rule",
+        "date-time",
+    ]);
+    assert_eq!(code(&output), ERROR);
+    assert!(stderr(&output).contains("M3.4"), "{}", stderr(&output));
+}
+
+// -- `match` and the exit codes of SCOPE.md 11 -----------------------------------------------
+
+/// The question was answered, and the answer was no.
+const NO: i32 = 1;
+
+fn json() -> String {
+    grammars()
+        .join("rfc8259-json.abnf")
+        .to_str()
+        .expect("utf-8 path")
+        .to_owned()
+}
+
+fn dates() -> String {
+    grammars()
+        .join("rfc3339-datetime.abnf")
+        .to_str()
+        .expect("utf-8 path")
+        .to_owned()
+}
+
+fn corpus(bucket: &str) -> String {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("corpus")
+        .join("rfc8259")
+        .join(bucket)
+        .to_str()
+        .expect("utf-8 path")
+        .to_owned()
+}
+
+#[test]
+fn a_single_input_answers_yes_or_no() {
+    let accepted = run(&[
+        "match",
+        &dates(),
+        "--rule",
+        "date-time",
+        "--input",
+        "2026-09-20T12:00:00Z",
+    ]);
+    assert_eq!(code(&accepted), OK);
+
+    let rejected = run(&["match", &dates(), "--rule", "date-time", "--input", "nope"]);
+    assert_eq!(code(&rejected), NO);
+}
+
+#[test]
+fn a_rejection_is_silent_on_stderr() {
+    // Exit 1 is an answer, not a failure: nothing went wrong, the input simply does not match.
+    let output = run(&["match", &dates(), "--rule", "date-time", "--input", "nope"]);
+    assert_eq!(code(&output), NO);
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+}
+
+#[test]
+fn an_unknown_rule_is_an_error_not_a_rejection() {
+    let output = run(&["match", &dates(), "--rule", "nope", "--input", "x"]);
+    assert_eq!(code(&output), ERROR);
+    assert!(
+        stderr(&output).contains("unknown rule"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn a_compatibility_limit_is_reported_before_the_input_is_read() {
+    // RFC 9110 gives its URI rules as prose, so `Location` has no matching semantics at all.
+    // Answering "does not match" would be a lie about a rule that cannot be matched (D11).
+    let http = grammars().join("rfc9110-http.abnf");
+    let output = run(&[
+        "match",
+        http.to_str().expect("utf-8 path"),
+        "--rule",
+        "Location",
+        "--input",
+        "http://example.test/",
+    ]);
+    assert_eq!(code(&output), ERROR);
+    assert!(
+        stderr(&output).contains("prose value"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn limits_are_errors_not_verdicts() {
+    for (flag, value, needle) in [
+        ("--max-steps", "3", "step limit"),
+        ("--max-depth", "4", "depth limit"),
+    ] {
         let output = run(&[
-            subcommand,
-            file.to_str().expect("utf-8 path"),
+            "match",
+            &json(),
             "--rule",
-            "date-time",
+            "JSON-text",
+            "--input",
+            "[[[[[1]]]]]",
+            flag,
+            value,
         ]);
-        assert_eq!(code(&output), ERROR);
-        assert!(stderr(&output).contains(milestone), "{}", stderr(&output));
+        assert_eq!(code(&output), ERROR, "{flag}: {}", stderr(&output));
+        assert!(stderr(&output).contains(needle), "{}", stderr(&output));
     }
+}
+
+#[test]
+fn the_depth_limit_applies_by_default() {
+    // Without a finite default the process would abort rather than answer, and an abort is not
+    // an exit code a caller can act on (D42).
+    let deep = format!("{}1{}", "[".repeat(5_000), "]".repeat(5_000));
+    let output = run(&["match", &json(), "--rule", "JSON-text", "--input", &deep]);
+    assert_eq!(code(&output), ERROR);
+    assert!(
+        stderr(&output).contains("depth limit"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn input_can_come_from_a_file() {
+    let dir = std::env::temp_dir().join("abnf-oracle-cli-file");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("date.txt");
+    std::fs::write(&path, "2026-09-20T12:00:00Z").expect("write");
+
+    let output = run(&[
+        "match",
+        &dates(),
+        "--rule",
+        "date-time",
+        "--file",
+        path.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code(&output), OK, "{}", stderr(&output));
+}
+
+#[test]
+fn invalid_utf8_input_is_an_error_never_a_rejection() {
+    // D14, and the reason the corpus keeps such files out of `reject/`: the recognizer never
+    // sees them, so "does not match" would be answering a different question.
+    let dir = std::env::temp_dir().join("abnf-oracle-cli-utf8");
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("bad.txt");
+    std::fs::write(&path, [0x22, 0xFF, 0x22]).expect("write");
+
+    let output = run(&[
+        "match",
+        &json(),
+        "--rule",
+        "JSON-text",
+        "--file",
+        path.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code(&output), ERROR);
+    assert!(stderr(&output).contains("UTF-8"), "{}", stderr(&output));
+}
+
+#[test]
+fn a_directory_of_accepted_inputs_exits_zero() {
+    let output = run(&[
+        "match",
+        &json(),
+        "--rule",
+        "JSON-text",
+        "--dir",
+        &corpus("accept"),
+    ]);
+    assert_eq!(code(&output), OK, "{}", stderr(&output));
+
+    let listing = stdout(&output);
+    let lines: Vec<&str> = listing.lines().collect();
+    assert_eq!(lines.len(), 95, "one line per file");
+    assert!(
+        lines.iter().all(|line| line.ends_with("ACCEPT")),
+        "every line should be ACCEPT"
+    );
+}
+
+#[test]
+fn a_directory_with_a_rejection_exits_one() {
+    let output = run(&[
+        "match",
+        &json(),
+        "--rule",
+        "JSON-text",
+        "--dir",
+        &corpus("reject"),
+    ]);
+    assert_eq!(code(&output), NO);
+    assert!(stdout(&output).lines().all(|line| line.ends_with("REJECT")));
+}
+
+#[test]
+fn an_error_anywhere_in_a_directory_dominates() {
+    // `indeterminate/` holds undecodable files, files that nest past the depth limit, and
+    // ordinary acceptances and rejections. One unanswerable question makes the run
+    // unanswered, whatever else it found (SCOPE.md 11).
+    let output = run(&[
+        "match",
+        &json(),
+        "--rule",
+        "JSON-text",
+        "--dir",
+        &corpus("indeterminate"),
+    ]);
+    assert_eq!(code(&output), ERROR);
+
+    let listing = stdout(&output);
+    assert!(
+        listing.contains("ACCEPT"),
+        "and it kept going after the errors"
+    );
+    assert!(listing.contains("ERROR not valid UTF-8"));
+    assert!(listing.contains("ERROR recursion depth limit exceeded"));
+}
+
+#[test]
+fn a_directory_listing_is_one_line_per_file_and_sorted() {
+    let output = run(&[
+        "match",
+        &json(),
+        "--rule",
+        "JSON-text",
+        "--dir",
+        &corpus("accept"),
+    ]);
+    let listing = stdout(&output);
+    let names: Vec<&str> = listing
+        .lines()
+        .map(|line| line.split_whitespace().next().unwrap_or_default())
+        .collect();
+
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted, "sorted, so two runs can be diffed");
+}
+
+#[test]
+fn exactly_one_input_source_is_required() {
+    let none = run(&["match", &dates(), "--rule", "date-time"]);
+    assert_eq!(code(&none), ERROR);
+
+    let both = run(&[
+        "match",
+        &dates(),
+        "--rule",
+        "date-time",
+        "--input",
+        "x",
+        "--file",
+        "y",
+    ]);
+    assert_eq!(code(&both), ERROR, "clap rejects two sources");
+}
+
+#[test]
+fn a_grammar_that_does_not_check_is_an_error() {
+    let broken = grammars().join(INVALID).join("undefined-rule.abnf");
+    let output = run(&[
+        "match",
+        broken.to_str().expect("utf-8 path"),
+        "--rule",
+        "start",
+        "--input",
+        "a",
+    ]);
+    assert_eq!(code(&output), ERROR);
+    assert!(
+        stderr(&output).contains("undefined rule"),
+        "{}",
+        stderr(&output)
+    );
 }

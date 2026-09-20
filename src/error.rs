@@ -343,7 +343,7 @@ impl fmt::Display for MatchError {
             }
             Self::StepLimit => f.write_str("step limit exceeded"),
             Self::DepthLimit => f.write_str(
-                "recursion depth limit exceeded; the input nests more deeply than                  `MatchOptions::max_depth` allows",
+                "recursion depth limit exceeded: the input nests deeper than `MatchOptions::max_depth` allows",
             ),
         }
     }

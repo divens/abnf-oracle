@@ -13,12 +13,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use abnf_oracle::{CheckedGrammar, Grammar, MinLen};
+use abnf_oracle::{
+    CheckedGrammar, DEFAULT_MAX_DEPTH, Grammar, MatchError, MatchOptions, MinLen, Recognizer,
+};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 
-/// The question was answered.
+/// The question was answered, and the answer was yes.
 const OK: u8 = 0;
+/// The question was answered, and the answer was no.
+const NO: u8 = 1;
 /// The question could not be answered.
 const ERROR: u8 = 2;
 
@@ -47,6 +51,21 @@ enum Command {
         /// The start rule.
         #[arg(long)]
         rule: String,
+        /// The input, given directly.
+        #[arg(long, group = "source")]
+        input: Option<String>,
+        /// A file holding the input.
+        #[arg(long, group = "source")]
+        file: Option<PathBuf>,
+        /// A directory of inputs, one per file.
+        #[arg(long, group = "source")]
+        dir: Option<PathBuf>,
+        /// Give up after this many steps rather than running unboundedly.
+        #[arg(long, value_name = "N")]
+        max_steps: Option<u64>,
+        /// Allow recursion this deep. Nesting in the input costs depth; length does not.
+        #[arg(long, value_name = "N")]
+        max_depth: Option<usize>,
     },
     /// Generate strings that match a rule.
     Gen {
@@ -77,7 +96,30 @@ fn run() -> Result<u8> {
     match Cli::parse().command {
         Command::Check { grammar, starts } => check(&grammar, &starts),
         Command::Rules { grammar } => rules(&grammar),
-        Command::Match { .. } => bail!("`match` lands in M2.7"),
+        Command::Match {
+            grammar,
+            rule,
+            input,
+            file,
+            dir,
+            max_steps,
+            max_depth,
+        } => {
+            let options = MatchOptions {
+                max_steps,
+                // Absent means the library default, not "unlimited": a crash is not an answer
+                // (SCOPE.md 6.2, D42).
+                max_depth: max_depth.or(Some(DEFAULT_MAX_DEPTH)),
+            };
+            let source = match (input, file, dir) {
+                (Some(text), None, None) => Source::Literal(text),
+                (None, Some(path), None) => Source::File(path),
+                (None, None, Some(path)) => Source::Dir(path),
+                // clap's group enforces at most one; this is the none-at-all case.
+                _ => bail!("one of --input, --file or --dir is required"),
+            };
+            matching(&grammar, &rule, source, &options)
+        }
         Command::Gen { .. } => bail!("`gen` lands in M3.4"),
     }
 }
@@ -142,6 +184,162 @@ fn check(path: &Path, starts: &[String]) -> Result<u8> {
         println!("note: pass --start to name entry points and enable unreachable-rule warnings");
     }
     Ok(OK)
+}
+
+/// Where the input to match comes from.
+enum Source {
+    /// `--input`: the text itself.
+    Literal(String),
+    /// `--file`: one input.
+    File(PathBuf),
+    /// `--dir`: one input per file.
+    Dir(PathBuf),
+}
+
+/// What happened to one input.
+enum Verdict {
+    Accept,
+    Reject,
+    /// Something stopped the question being answered — a decoding failure, or a limit.
+    Error(String),
+}
+
+impl Verdict {
+    fn label(&self) -> String {
+        match self {
+            Self::Accept => "ACCEPT".to_owned(),
+            Self::Reject => "REJECT".to_owned(),
+            Self::Error(why) => format!("ERROR {why}"),
+        }
+    }
+}
+
+/// Decides one input, or every input in a directory.
+///
+/// The exit code is the whole contract here (SCOPE.md 11): `0` accepted, `1` rejected, `2`
+/// could not be decided. Across a directory an error dominates a rejection, because a run that
+/// failed to answer part of the question has not answered it.
+fn matching(path: &Path, rule: &str, source: Source, options: &MatchOptions) -> Result<u8> {
+    let Some((_, grammar)) = load(path)? else {
+        return Ok(ERROR);
+    };
+
+    // Before reading any input: a rule that reaches prose or an unrepresentable terminal is not
+    // a usable start rule at all, and reporting that as "does not match" would be a lie
+    // (SCOPE.md 6.5, 6.6).
+    if let Err(why) = grammar.can_recognize(rule) {
+        eprintln!("error: {why}");
+        return Ok(ERROR);
+    }
+
+    match source {
+        Source::Literal(text) => Ok(report_one(&grammar, rule, &text, options)),
+        Source::File(file) => {
+            let bytes = fs::read(&file).with_context(|| format!("reading {}", file.display()))?;
+            match decode(&bytes) {
+                Ok(text) => Ok(report_one(&grammar, rule, &text, options)),
+                Err(why) => {
+                    eprintln!("error: {}: {why}", file.display());
+                    Ok(ERROR)
+                }
+            }
+        }
+        Source::Dir(dir) => matching_dir(&grammar, rule, &dir, options),
+    }
+}
+
+/// Decides one input and turns the verdict into an exit code.
+fn report_one(grammar: &CheckedGrammar, rule: &str, text: &str, options: &MatchOptions) -> u8 {
+    match decide(grammar, rule, text, options) {
+        Verdict::Accept => OK,
+        Verdict::Reject => NO,
+        Verdict::Error(why) => {
+            eprintln!("error: {why}");
+            ERROR
+        }
+    }
+}
+
+fn decide(grammar: &CheckedGrammar, rule: &str, text: &str, options: &MatchOptions) -> Verdict {
+    let mut recognizer = Recognizer::new(grammar, text).with_options(options.clone());
+    match recognizer.accepts(rule) {
+        Ok(true) => Verdict::Accept,
+        Ok(false) => Verdict::Reject,
+        // A limit is not a verdict. `DepthLimit` in particular says the input nests more deeply
+        // than the recognizer was allowed to follow, which is not the same as not matching.
+        Err(error @ (MatchError::StepLimit | MatchError::DepthLimit)) => {
+            Verdict::Error(error.to_string())
+        }
+        Err(error) => Verdict::Error(error.to_string()),
+    }
+}
+
+/// Decodes one input file. Invalid UTF-8 is an error, never a rejection (D14).
+fn decode(bytes: &[u8]) -> Result<String, &'static str> {
+    core::str::from_utf8(bytes)
+        .map(ToOwned::to_owned)
+        .map_err(|_| "not valid UTF-8")
+}
+
+fn matching_dir(
+    grammar: &CheckedGrammar,
+    rule: &str,
+    dir: &Path,
+    options: &MatchOptions,
+) -> Result<u8> {
+    let mut entries: Vec<PathBuf> = fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<std::io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|path| path.is_file())
+        .collect();
+    // Sorted, so a run over a directory is reproducible and two runs can be diffed.
+    entries.sort();
+
+    if entries.is_empty() {
+        bail!("{} holds no files", dir.display());
+    }
+
+    let width = entries
+        .iter()
+        .map(|path| file_name(path).len())
+        .max()
+        .unwrap_or(0);
+
+    let mut rejected = false;
+    let mut errored = false;
+    for path in &entries {
+        let verdict = match fs::read(path) {
+            Ok(bytes) => match decode(&bytes) {
+                Ok(text) => decide(grammar, rule, &text, options),
+                Err(why) => Verdict::Error(why.to_owned()),
+            },
+            Err(error) => Verdict::Error(error.to_string()),
+        };
+        match verdict {
+            Verdict::Accept => {}
+            Verdict::Reject => rejected = true,
+            Verdict::Error(_) => errored = true,
+        }
+        println!("{:<width$}  {}", file_name(path), verdict.label());
+    }
+
+    // Error dominates rejection: a run that could not answer for one file has not answered.
+    Ok(if errored {
+        ERROR
+    } else if rejected {
+        NO
+    } else {
+        OK
+    })
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("?")
+        .to_owned()
 }
 
 fn rules(path: &Path) -> Result<u8> {
