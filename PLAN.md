@@ -622,16 +622,29 @@ a bug here degrades into a hang bounded only by `max_steps`.
 required to parse. Three things the test must get right:
 
 - **Assert `parse`, not `check`.** Generated grammars reference rule names that were never
-  defined, so `check()` will fail on nearly all of them. That is expected and is not what this
-  test is about.
-- **Pin `spread` to a small value.** The self-grammar spells numbers as `1*DIGIT` / `1*HEXDIG`,
-  so a large `spread` produces literals wider than `u64` and the test starts failing with
-  `NumberTooLarge` — a legitimate parse error (D17) that has nothing to do with the invariant.
-  With the default `spread = 3` the generated literals are at most 4 digits. Either pin it or
-  treat `NumberTooLarge` as a pass; pinning is clearer.
+  defined, so `check()` fails on nearly all of them. That is expected — the self-grammar
+  describes ABNF's *syntax*, and says nothing about whether a name resolves (D32). Measured in
+  M3.3: a handful do check, most do not.
+- **Pin `spread`.** The threshold is sharper than earlier revisions of this plan claimed, and
+  the production is a different one: numbers come from `1*HEXDIG`, not `1*DIGIT`, and **17 hex
+  digits overflow a `u64`**, so `NumberTooLarge` starts appearing at `spread = 16` — not at 19
+  as the digit count would suggest. At the default of 3 the widest number generated is four
+  digits, nowhere near it. Pin it anyway, so a future change to the default cannot quietly turn
+  this into a test of the numeric limit.
 - Generated text is ASCII-clean by construction (every terminal in the self-grammar is an ASCII
-  range), so the D35 gate should never fire here. If it ever does, the bug is in the generator
-  or the fixture, and the test should say so rather than tolerating it.
+  range), so the D35 gate should never fire here. Asserted rather than assumed.
+
+**What it uniquely catches** (measured in M3.3 by mutation). Making the radix markers
+case-sensitive — a plausible mistake, since `%x41` is what everyone writes — fails this suite
+and leaves `parse_grammars` and `self_definition` entirely green, because **no RFC fixture uses
+`%X`, `%B` or `%D`**. The self-grammar spells those markers as case-insensitive `char-val`s, so
+the uppercase forms are part of the language; generated text explores that corner mechanically,
+where a fixture set only covers what its authors happened to write. A hand-written unit test in
+M1.1 also catches it, but only because the question occurred to me while reading the grammar.
+
+Generated grammars are also put through the M1 round-trip contract, which is a free and much
+harsher test of the printer than the fixtures provide: 500 adversarial grammars parse, print,
+and re-parse to an equal grammar whose own printing is a fixpoint.
 
 ---
 
@@ -696,7 +709,7 @@ JSONTestSuite is MIT-licensed: vendor `test_parsing/` only, with its `LICENSE` a
 |---|---|---|
 | **3.1** | `generate.rs`: walk, terminals, ranges, case variation, `preserve_case`, depth budget, witness mode, limits, `steps()` (§7); `CheckedGrammar::can_generate` | **83,200 round-trips — every generatable rule of every fixture × 200 seeds — zero failures and zero limit hits.** The sweep samples seeds and caps output by default so a local `cargo test` stays under 10s; CI runs it in full and uncapped |
 | **3.2** | Generatable graph, unit enumeration, `dist_to_uncovered` by reverse BFS, the chase, coverage-aware repetition counts, commit-on-success, `uncovered()` | the bound holds on RFC 8259 and three other fixtures, and on a grammar with an unproductive alternative; depth-independence at `max_depth = 2` behind a five-rule chain; chase determinism; nested units not counted; `*("a" / "b")` covers both in ≤ 2 calls; a `*0(…)` body reports zero units; **validated by mutation** — the substitute SCOPE rejects overflows the stack on JSON |
-| **3.3** | Self-generation test (§4.5, D35) | 500 generated `rulelist` strings all parse |
+| **3.3** | `tests/self_generation.rs` (§4.5, D35) | 500 generated `rulelist` strings parse, and 1,000 more across 40 seeds; they also **round-trip** through `Display`; **validated by mutation** — making radix markers case-sensitive fails this suite while the entire fixture-based suite stays green |
 | **3.4** | Determinism and resource-bound tests; `uncovered()`; CLI `gen` | 100-call identical sequences; `1000000000*"a"` → `OutputLimit`; the `max_depth = 0` witness case; random mode terminates on 1000 seeds |
 
 Every M3 fixture is now runnable as specified; the only adjustment PR 3.2 makes on its own
