@@ -695,7 +695,7 @@ JSONTestSuite is MIT-licensed: vendor `test_parsing/` only, with its `LICENSE` a
 | PR | Contents | Done when |
 |---|---|---|
 | **3.1** | `generate.rs`: walk, terminals, ranges, case variation, `preserve_case`, depth budget, witness mode, limits, `steps()` (§7); `CheckedGrammar::can_generate` | **83,200 round-trips — every generatable rule of every fixture × 200 seeds — zero failures and zero limit hits.** The sweep samples seeds and caps output by default so a local `cargo test` stays under 10s; CI runs it in full and uncapped |
-| **3.2** | Generatable graph, unit enumeration, `dist_to_uncovered`, the chase, coverage-aware repetition counts, commit-on-success (§3.7, §4.4) | the exact bound holds on RFC 8259 and on a grammar with an unproductive alternative; depth-independence case (5-deep chain at `max_depth = 2`); chase determinism on `a = b / c`, `b = "z" a`, `c = "x" / "y"` with `preserve_case` (§2.1); nested units not counted (`uncovered(start) == 2`); `*("a" / "b")` covers both in ≤ 2 calls; a `*0(…)` body reports zero units |
+| **3.2** | Generatable graph, unit enumeration, `dist_to_uncovered` by reverse BFS, the chase, coverage-aware repetition counts, commit-on-success, `uncovered()` | the bound holds on RFC 8259 and three other fixtures, and on a grammar with an unproductive alternative; depth-independence at `max_depth = 2` behind a five-rule chain; chase determinism; nested units not counted; `*("a" / "b")` covers both in ≤ 2 calls; a `*0(…)` body reports zero units; **validated by mutation** — the substitute SCOPE rejects overflows the stack on JSON |
 | **3.3** | Self-generation test (§4.5, D35) | 500 generated `rulelist` strings all parse |
 | **3.4** | Determinism and resource-bound tests; `uncovered()`; CLI `gen` | 100-call identical sequences; `1000000000*"a"` → `OutputLimit`; the `max_depth = 0` witness case; random mode terminates on 1000 seeds |
 
@@ -728,6 +728,21 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 | R8 | The ASCII-cleanliness scan and the deliberately non-ASCII invalid fixture contradict each other. | Scope the scan to exclude `tests/grammars/invalid/parse/` (PR 1.1 / 1.3). Small, but it will fail CI on the day the fixture lands if nobody planned for it. |
 | R9 | Memo clone cost making the JSON corpus slow enough to annoy. **Surfaced in M3.1, in the tests rather than the corpus**: verifying a multi-kilobyte generated string is superlinear in its length, so the uncapped sweep took 53s where the capped one takes 8. | Still accepted for v1 — performance is a non-goal and the cap is a test-side knob, not a library limit. The sweep caps output by default and CI runs it uncapped, so nothing goes unverified. Revisit with measurements after M4. |
 | R10 | A bug in the chase degrades into a walk bounded only by `max_steps` — slow and hard to diagnose. | Debug assertion `dist[chosen] < dist[current]` on every chase step (§4.4), so the invariant fails loudly in tests rather than quietly in the field. |
+
+### 6.3 The chase, validated by mutation (M3.2)
+
+SCOPE §6.8 argues that "prefer any branch that reaches an uncovered unit, ties at random" is
+*not* an acceptable substitute for `argmin dist`, and gives a three-rule grammar where it would
+lap unboundedly. That argument is now checked rather than believed: replacing the `argmin` with
+"the first branch that reaches one" makes `the_bound_holds_on_the_json_grammar` **overflow the
+stack**. Eight of the thirteen coverage tests still pass under that mutation, so the ones that
+catch it are doing real work.
+
+Worth noting that the failure is not the one the spec predicted. SCOPE expects the lap to trip
+`max_output_len`; on a grammar as richly recursive as JSON it exhausts the *stack* first, since
+the generator recurses per node. Same root cause, louder symptom — and a reminder that the
+generator has the same unbounded-recursion exposure the recognizer did before D42, which is
+worth revisiting if a grammar ever drives it there without a mutation to help.
 
 ### 6.2 A quadratic output-limit check (found in M3.1)
 
