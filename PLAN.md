@@ -719,8 +719,7 @@ authority is setting `preserve_case` on the chase test (§2.1).
 
 | PR | Contents |
 |---|---|
-| **4.1** | `scripts/differential.sh`: `abnfgen -c` per fixture → `abnf-oracle match`, assert accept |
-| **4.2** | go-abnf / Python `abnf` verdict comparison where installed; pre-document the expected octet-range disagreements (§3) |
+| **4.1–4.2** | `scripts/differential.py` driving **two** implementations — python-abnf 2.9.0 and go-abnf v0.5.1 (through `scripts/goharness`, a thin Go program using this crate's exit-code convention) — in three directions: we generate/they accept, they generate/we accept, and a shared corpus. `scripts/DIFFERENTIAL.md` records the run. **Found a real bug in go-abnf**: an alternation whose first branch carries `%s` is treated as case-sensitive throughout |
 | **4.3** | README (20-line example plus an explicit "what this is not"), docs pass, crates.io metadata, release |
 
 Every disagreement found here becomes a corpus file *before* it becomes a fix (§9).
@@ -741,6 +740,60 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 | R8 | The ASCII-cleanliness scan and the deliberately non-ASCII invalid fixture contradict each other. | Scope the scan to exclude `tests/grammars/invalid/parse/` (PR 1.1 / 1.3). Small, but it will fail CI on the day the fixture lands if nobody planned for it. |
 | R9 | Memo clone cost making the JSON corpus slow enough to annoy. **Surfaced in M3.1, in the tests rather than the corpus**: verifying a multi-kilobyte generated string is superlinear in its length, so the uncapped sweep took 53s where the capped one takes 8. | Still accepted for v1 — performance is a non-goal and the cap is a test-side knob, not a library limit. The sweep caps output by default and CI runs it uncapped, so nothing goes unverified. Revisit with measurements after M4. |
 | R10 | A bug in the chase degrades into a walk bounded only by `max_steps` — slow and hard to diagnose. | Debug assertion `dist[chosen] < dist[current]` on every chase step (§4.4), so the invariant fails loudly in tests rather than quietly in the field. |
+
+### 6.5 What differential testing actually found (M4)
+
+**A real bug in go-abnf v0.5.1**, which is the outcome this milestone exists for. An alternation
+whose *first* branch carries `%s` is treated as case-sensitive throughout: `%s"x" / %i"x"`
+rejects `"X"`, while the reversed `%i"x" / %s"x"` accepts it. RFC 7405 §2.2 makes `%i` and
+unmarked strings case-insensitive regardless of what precedes them. This crate and python-abnf
+agree on all four orderings; only go-abnf differs.
+
+It surfaced from `tests/grammars/rfc7405-case-sensitivity.abnf` — the fixture written in M3.3
+*because no RFC grammar in the set uses `%s` or `%i`*. Two milestones later, that corner had
+someone else's bug in it.
+
+**Three implementations, three positions on core-rule shadowing.** python-abnf forbids it
+outright; go-abnf allows it behind a flag whose documentation requires "an isomorphism between
+the core rule and the redefinition"; this crate always allows it (D6). Both others are leaky —
+a redefinition replaces the rule everywhere — which is precisely what D33's hygienic resolution
+avoids, and precisely why D40 could make shadowing a lint while citing RFC 8259 as evidence.
+RFC 8259 violates go-abnf's stated precondition, and the flag is safe there only by accident of
+which core rules JSON happens to use.
+
+**No octet-range disagreement appeared**, though SCOPE.md M4 expected to document one in
+advance. RFC 9110's `obs-text = %x80-FF` round-trips through both, so all three read those
+terminals as code points. The §3 limitation is real but does not separate these tools.
+
+**Two harness bugs, both silent.** Python's `read_text()` translates CRLF to LF on Windows,
+producing ~40 phantom findings on RFC 5322. And `goharness matchdir` flushed its output with
+`defer`, which `os.Exit` skips — it printed nothing, exited 0, and the driver read that as
+"could not decide" for every input while the totals still showed 100% agreement. Caught only
+because the per-grammar line read `0 of ours accepted` beside a clean summary. The script now
+prints an `undecided` count per grammar: silence must not look like success.
+
+### 6.5b Earlier single-implementation run
+
+Zero disagreements over 1850 verdicts, which is the boring and desirable outcome. Three things
+worth keeping:
+
+**python-abnf cannot load RFC 8259.** It refuses any grammar defining a core-rule name, and JSON
+defines `char`. Its error explains why: *"the definition would replace the rule everywhere, not
+just here"* — the leaky resolution model. Because this crate resolves hygienically (D33),
+shadowing is safe and only a lint (D6), so it loads the published grammar. SCOPE.md D40 argued
+exactly this using RFC 8259 as evidence; an independent implementation now demonstrates the
+alternative's cost.
+
+**No octet-range disagreement appeared**, though SCOPE.md M4 expected to document one in advance.
+RFC 9110's `obs-text = %x80-FF` produced 585 strings python-abnf accepted, so both read those
+terminals as code points. The §3 limitation is real but does not separate these two tools — it
+would take a genuinely byte-oriented implementation to show it.
+
+**The first run produced ~40 false findings**, all from the harness: Python's `read_text()` does
+universal-newline translation, turning generated `CRLF` into `LF`, and every RFC 5322 `obs-*`
+rule ends in `CRLF`. That is the failure mode differential testing invites, and it is why M4's
+"understand every disagreement before waiving it" is the right rule — the harness is a suspect
+alongside both implementations.
 
 ### 6.4 `gen --out`, a deviation from §11 (M3.4)
 
