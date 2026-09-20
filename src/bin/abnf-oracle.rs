@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use abnf_oracle::{
-    CheckedGrammar, DEFAULT_MAX_DEPTH, Grammar, MatchError, MatchOptions, MinLen, Recognizer,
+    CheckedGrammar, DEFAULT_MAX_DEPTH, GenOptions, Generator, Grammar, MatchError, MatchOptions,
+    MinLen, Recognizer,
 };
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -74,6 +75,37 @@ enum Command {
         /// The start rule.
         #[arg(long)]
         rule: String,
+        /// Seed for the generator. The same seed gives the same strings.
+        #[arg(long, default_value_t = 0)]
+        seed: u64,
+        /// How many strings to generate.
+        #[arg(long, default_value_t = 1, value_name = "N")]
+        count: usize,
+        /// Steer towards branches not yet taken, rather than choosing randomly.
+        #[arg(long)]
+        coverage: bool,
+        /// How deep to recurse before falling back to the shortest known derivation.
+        #[arg(long, value_name = "N")]
+        depth: Option<usize>,
+        /// How many repetitions beyond the minimum to consider.
+        #[arg(long, value_name = "N")]
+        spread: Option<usize>,
+        /// Emit case-insensitive strings as written, rather than varying their case.
+        #[arg(long)]
+        preserve_case: bool,
+        /// Give up once a string reaches this many characters.
+        #[arg(long, value_name = "N")]
+        max_output_len: Option<usize>,
+        /// Give up after visiting this many nodes.
+        #[arg(long, value_name = "N")]
+        max_steps: Option<u64>,
+        /// Write one file per string into this directory, rather than one per line.
+        ///
+        /// Generated strings may contain line endings — a grammar of grammars produces them by
+        /// the handful — so a line-oriented listing cannot represent them unambiguously. This
+        /// pairs with `match --dir`.
+        #[arg(long, value_name = "DIR")]
+        out: Option<PathBuf>,
     },
     /// List the rules of a grammar with their analyses.
     Rules {
@@ -120,7 +152,33 @@ fn run() -> Result<u8> {
             };
             matching(&grammar, &rule, source, &options)
         }
-        Command::Gen { .. } => bail!("`gen` lands in M3.4"),
+        Command::Gen {
+            grammar,
+            rule,
+            seed,
+            count,
+            coverage,
+            depth,
+            spread,
+            preserve_case,
+            max_output_len,
+            max_steps,
+            out,
+        } => {
+            let defaults = GenOptions::default();
+            let options = GenOptions {
+                coverage,
+                preserve_case,
+                max_depth: depth.unwrap_or(defaults.max_depth),
+                spread: spread.unwrap_or(defaults.spread),
+                // An absent flag means the library default, which is finite. Passing 0 is how a
+                // caller asks for no limit at all.
+                max_output_len: max_output_len
+                    .map_or(defaults.max_output_len, |n| (n > 0).then_some(n)),
+                max_steps: max_steps.map_or(defaults.max_steps, |n| (n > 0).then_some(n)),
+            };
+            generating(&grammar, &rule, seed, count, &options, out.as_deref())
+        }
     }
 }
 
@@ -340,6 +398,69 @@ fn file_name(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("?")
         .to_owned()
+}
+
+/// Generates `count` strings from `rule`.
+///
+/// Exit codes follow the same rule as everything else here: `0` if the question was answered,
+/// `2` if it could not be. A resource limit is the second kind — a string that could not be
+/// produced is not the same as a rule that produces nothing (D29).
+fn generating(
+    path: &Path,
+    rule: &str,
+    seed: u64,
+    count: usize,
+    options: &GenOptions,
+    out: Option<&Path>,
+) -> Result<u8> {
+    let Some((_, grammar)) = load(path)? else {
+        return Ok(ERROR);
+    };
+
+    // Before generating anything: a rule that reaches prose or an unrepresentable terminal has
+    // no expansion at all, and neither does an unproductive one (SCOPE.md 6.5, D9).
+    if let Err(why) = grammar.can_generate(rule) {
+        eprintln!("error: {why}");
+        return Ok(ERROR);
+    }
+
+    if let Some(dir) = out {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+
+    let mut generator = Generator::new(&grammar, seed).with_options(options.clone());
+    for index in 0..count {
+        let produced = match generator.generate(rule) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("error: string {index}: {error}");
+                return Ok(ERROR);
+            }
+        };
+
+        match out {
+            // Named by index alone: a generated string has no description to give it, and the
+            // corpus convention of SCOPE.md 9 expects the caller to rename what it keeps.
+            Some(dir) => {
+                let file = dir.join(format!("{index:04}.txt"));
+                fs::write(&file, produced.as_bytes())
+                    .with_context(|| format!("writing {}", file.display()))?;
+            }
+            None => println!("{produced}"),
+        }
+    }
+
+    if options.coverage {
+        // Worth saying, because it is the number that bounds how many more calls full coverage
+        // would take.
+        let left = generator.uncovered(rule).unwrap_or(0);
+        eprintln!(
+            "{count} {}, {left} coverage {} remaining",
+            plural(count, "string", "strings"),
+            plural(left, "unit", "units")
+        );
+    }
+    Ok(OK)
 }
 
 fn rules(path: &Path) -> Result<u8> {

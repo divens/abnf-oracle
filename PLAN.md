@@ -710,7 +710,7 @@ JSONTestSuite is MIT-licensed: vendor `test_parsing/` only, with its `LICENSE` a
 | **3.1** | `generate.rs`: walk, terminals, ranges, case variation, `preserve_case`, depth budget, witness mode, limits, `steps()` (§7); `CheckedGrammar::can_generate` | **83,200 round-trips — every generatable rule of every fixture × 200 seeds — zero failures and zero limit hits.** The sweep samples seeds and caps output by default so a local `cargo test` stays under 10s; CI runs it in full and uncapped |
 | **3.2** | Generatable graph, unit enumeration, `dist_to_uncovered` by reverse BFS, the chase, coverage-aware repetition counts, commit-on-success, `uncovered()` | the bound holds on RFC 8259 and three other fixtures, and on a grammar with an unproductive alternative; depth-independence at `max_depth = 2` behind a five-rule chain; chase determinism; nested units not counted; `*("a" / "b")` covers both in ≤ 2 calls; a `*0(…)` body reports zero units; **validated by mutation** — the substitute SCOPE rejects overflows the stack on JSON |
 | **3.3** | `tests/self_generation.rs` (§4.5, D35) | 500 generated `rulelist` strings parse, and 1,000 more across 40 seeds; they also **round-trip** through `Display`; **validated by mutation** — making radix markers case-sensitive fails this suite while the entire fixture-based suite stays green |
-| **3.4** | Determinism and resource-bound tests; `uncovered()`; CLI `gen` | 100-call identical sequences; `1000000000*"a"` → `OutputLimit`; the `max_depth = 0` witness case; random mode terminates on 1000 seeds |
+| **3.4** | CLI `gen` with every flag of §11 plus `--out`; 12 CLI tests | the four library criteria were already met by 3.1 and 3.2 (determinism over 100 calls, `OutputLimit`, the `max_depth = 0` witness case, 1,000 seeds terminating), so this PR is the CLI: `gen --out` then `match --dir` round-trips 50 generated strings through the binary |
 
 Every M3 fixture is now runnable as specified; the only adjustment PR 3.2 makes on its own
 authority is setting `preserve_case` on the chase test (§2.1).
@@ -741,6 +741,27 @@ Every disagreement found here becomes a corpus file *before* it becomes a fix (�
 | R8 | The ASCII-cleanliness scan and the deliberately non-ASCII invalid fixture contradict each other. | Scope the scan to exclude `tests/grammars/invalid/parse/` (PR 1.1 / 1.3). Small, but it will fail CI on the day the fixture lands if nobody planned for it. |
 | R9 | Memo clone cost making the JSON corpus slow enough to annoy. **Surfaced in M3.1, in the tests rather than the corpus**: verifying a multi-kilobyte generated string is superlinear in its length, so the uncapped sweep took 53s where the capped one takes 8. | Still accepted for v1 — performance is a non-goal and the cap is a test-side knob, not a library limit. The sweep caps output by default and CI runs it uncapped, so nothing goes unverified. Revisit with measurements after M4. |
 | R10 | A bug in the chase degrades into a walk bounded only by `max_steps` — slow and hard to diagnose. | Debug assertion `dist[chosen] < dist[current]` on every chase step (§4.4), so the invariant fails loudly in tests rather than quietly in the field. |
+
+### 6.4 `gen --out`, a deviation from §11 (M3.4)
+
+SCOPE §11 gives `gen` no output-destination flag, which works for a line-oriented listing and
+not otherwise: **generated strings can contain line endings**. Generating from the self-grammar
+produces multi-line grammars routinely, and a listing cannot represent those unambiguously.
+
+`--out DIR` writes one file per string, named by index. It pairs with `match --dir`, so the
+workflow the two subcommands exist for closes:
+
+```
+abnf-oracle gen   g.abnf --rule R --count 50 --coverage --out corpus/
+abnf-oracle match g.abnf --rule R --dir corpus/
+```
+
+Worth folding into §11 as a documented flag rather than leaving as an undocumented extra.
+
+Two smaller decisions while implementing it. An absent limit flag means the *library* default,
+which is finite on purpose (D29) — so `--max-output-len 0` is how a caller asks for no limit,
+rather than omitting the flag. And `--coverage` reports the remaining unit count on stderr,
+since that number is the bound on how many more calls full coverage would take.
 
 ### 6.3 The chase, validated by mutation (M3.2)
 

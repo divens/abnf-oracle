@@ -183,19 +183,6 @@ fn a_missing_file_is_an_error() {
     assert!(stderr(&output).contains("reading"), "{}", stderr(&output));
 }
 
-#[test]
-fn the_unimplemented_subcommand_says_so_rather_than_pretending() {
-    let file = grammars().join("rfc3339-datetime.abnf");
-    let output = run(&[
-        "gen",
-        file.to_str().expect("utf-8 path"),
-        "--rule",
-        "date-time",
-    ]);
-    assert_eq!(code(&output), ERROR);
-    assert!(stderr(&output).contains("M3.4"), "{}", stderr(&output));
-}
-
 // -- `match` and the exit codes of SCOPE.md 11 -----------------------------------------------
 
 /// The question was answered, and the answer was no.
@@ -472,5 +459,306 @@ fn a_grammar_that_does_not_check_is_an_error() {
         stderr(&output).contains("undefined rule"),
         "{}",
         stderr(&output)
+    );
+}
+
+// -- `gen` ------------------------------------------------------------------------------------
+
+/// A scratch directory for tests that write files, removed and recreated so a stale run cannot
+/// make the next one pass.
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join("abnf-oracle-cli").join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    dir
+}
+
+#[test]
+fn gen_writes_one_string_per_line() {
+    let output = run(&["gen", &dates(), "--rule", "date-time", "--count", "5"]);
+    assert_eq!(code(&output), OK, "{}", stderr(&output));
+    assert_eq!(stdout(&output).lines().count(), 5);
+}
+
+#[test]
+fn gen_defaults_to_one_string() {
+    let output = run(&["gen", &dates(), "--rule", "date-time"]);
+    assert_eq!(code(&output), OK);
+    assert_eq!(stdout(&output).lines().count(), 1);
+}
+
+#[test]
+fn the_same_seed_gives_the_same_strings() {
+    // D15, through the CLI: the seed is the whole interface to reproducibility.
+    let args = [
+        "gen",
+        &dates(),
+        "--rule",
+        "date-time",
+        "--seed",
+        "7",
+        "--count",
+        "5",
+    ];
+    assert_eq!(stdout(&run(&args)), stdout(&run(&args)));
+
+    let other = run(&[
+        "gen",
+        &dates(),
+        "--rule",
+        "date-time",
+        "--seed",
+        "8",
+        "--count",
+        "5",
+    ]);
+    assert_ne!(
+        stdout(&run(&args)),
+        stdout(&other),
+        "a different seed should give different strings"
+    );
+}
+
+#[test]
+fn preserve_case_pins_the_output() {
+    let grammar = grammars().join("rfc7405-case-sensitivity.abnf");
+    let grammar = grammar.to_str().expect("utf-8 path");
+
+    let varied = stdout(&run(&["gen", grammar, "--rule", "bare", "--count", "20"]));
+    assert!(
+        varied
+            .lines()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            > 1,
+        "case should vary by default: {varied}"
+    );
+
+    let pinned = stdout(&run(&[
+        "gen",
+        grammar,
+        "--rule",
+        "bare",
+        "--count",
+        "20",
+        "--preserve-case",
+    ]));
+    assert!(
+        pinned.lines().all(|line| line == "aBc"),
+        "preserve_case should pin it: {pinned}"
+    );
+}
+
+#[test]
+fn coverage_reports_what_is_left() {
+    let output = run(&[
+        "gen",
+        &json(),
+        "--rule",
+        "JSON-text",
+        "--count",
+        "2",
+        "--coverage",
+    ]);
+    assert_eq!(code(&output), OK);
+    assert!(
+        stderr(&output).contains("coverage unit"),
+        "coverage mode should say how many units remain: {}",
+        stderr(&output)
+    );
+}
+
+#[test]
+fn gen_refuses_a_rule_it_cannot_expand() {
+    // Each of the three reasons a rule cannot be a start rule for generation.
+    let http = grammars().join("rfc9110-http.abnf");
+    let prose = run(&[
+        "gen",
+        http.to_str().expect("utf-8 path"),
+        "--rule",
+        "Location",
+    ]);
+    assert_eq!(code(&prose), ERROR);
+    assert!(stderr(&prose).contains("prose"), "{}", stderr(&prose));
+
+    let unknown = run(&["gen", &dates(), "--rule", "nope"]);
+    assert_eq!(code(&unknown), ERROR);
+    assert!(
+        stderr(&unknown).contains("unknown rule"),
+        "{}",
+        stderr(&unknown)
+    );
+
+    let dir = scratch("unproductive");
+    let grammar = dir.join("g.abnf");
+    std::fs::write(&grammar, "start = \"x\" start\r\n").expect("write");
+    let dead = run(&[
+        "gen",
+        grammar.to_str().expect("utf-8 path"),
+        "--rule",
+        "start",
+    ]);
+    assert_eq!(code(&dead), ERROR);
+    assert!(
+        stderr(&dead).contains("finite expansion"),
+        "{}",
+        stderr(&dead)
+    );
+}
+
+#[test]
+fn a_resource_limit_is_an_error_not_a_short_string() {
+    // A string that could not be produced is not the same as a rule that produces nothing
+    // (D29), so this exits 2 rather than printing whatever it managed.
+    let dir = scratch("limits");
+    let grammar = dir.join("g.abnf");
+    std::fs::write(&grammar, "start = 1000000000\"a\"\r\n").expect("write");
+    let grammar = grammar.to_str().expect("utf-8 path");
+
+    let output = run(&["gen", grammar, "--rule", "start"]);
+    assert_eq!(code(&output), ERROR);
+    assert!(
+        stderr(&output).contains("output length"),
+        "{}",
+        stderr(&output)
+    );
+
+    let stepped = run(&["gen", grammar, "--rule", "start", "--max-steps", "4"]);
+    assert_eq!(code(&stepped), ERROR);
+    assert!(
+        stderr(&stepped).contains("step limit"),
+        "{}",
+        stderr(&stepped)
+    );
+}
+
+#[test]
+fn zero_means_no_limit() {
+    // The flags take a number, so there has to be some way to say "unlimited"; an absent flag
+    // means the library default, which is finite on purpose.
+    let dir = scratch("nolimit");
+    let grammar = dir.join("g.abnf");
+    std::fs::write(&grammar, "start = 2000000\"a\"\r\n").expect("write");
+    let grammar = grammar.to_str().expect("utf-8 path");
+
+    assert_eq!(
+        code(&run(&["gen", grammar, "--rule", "start"])),
+        ERROR,
+        "two million characters exceeds the default limit"
+    );
+
+    let unlimited = run(&["gen", grammar, "--rule", "start", "--max-output-len", "0"]);
+    assert_eq!(code(&unlimited), OK, "{}", stderr(&unlimited));
+    assert_eq!(stdout(&unlimited).trim_end().len(), 2_000_000);
+}
+
+#[test]
+fn out_writes_one_file_per_string() {
+    let dir = scratch("out");
+    let output = run(&[
+        "gen",
+        &json(),
+        "--rule",
+        "JSON-text",
+        "--count",
+        "12",
+        "--out",
+        dir.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code(&output), OK, "{}", stderr(&output));
+    assert!(
+        stdout(&output).is_empty(),
+        "with --out nothing goes to stdout: {}",
+        stdout(&output)
+    );
+
+    let files: Vec<_> = std::fs::read_dir(&dir)
+        .expect("readable")
+        .map(|entry| entry.expect("entry").path())
+        .collect();
+    assert_eq!(files.len(), 12);
+}
+
+#[test]
+fn generated_strings_survive_a_round_trip_through_the_cli() {
+    // The workflow the two subcommands exist to support: generate a corpus, then check it. Also
+    // the strongest end-to-end test there is of the generator and recognizer agreeing, since it
+    // goes through the public binary rather than the library.
+    let dir = scratch("roundtrip");
+    let generated = run(&[
+        "gen",
+        &json(),
+        "--rule",
+        "JSON-text",
+        "--count",
+        "50",
+        "--coverage",
+        "--out",
+        dir.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code(&generated), OK, "{}", stderr(&generated));
+
+    let matched = run(&[
+        "match",
+        &json(),
+        "--rule",
+        "JSON-text",
+        "--dir",
+        dir.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(
+        code(&matched),
+        OK,
+        "everything generated should match:\n{}",
+        stdout(&matched)
+    );
+    assert_eq!(stdout(&matched).lines().count(), 50);
+}
+
+#[test]
+fn out_preserves_strings_that_span_lines() {
+    // Why `--out` exists. A grammar of grammars produces line endings by the handful, and a
+    // line-oriented listing could not represent them unambiguously.
+    let dir = scratch("multiline");
+    let canonical = grammars().join("abnf-canonical.abnf");
+    let canonical = canonical.to_str().expect("utf-8 path");
+
+    let generated = run(&[
+        "gen",
+        canonical,
+        "--rule",
+        "rulelist",
+        "--count",
+        "10",
+        "--coverage",
+        "--out",
+        dir.to_str().expect("utf-8 path"),
+    ]);
+    assert_eq!(code(&generated), OK, "{}", stderr(&generated));
+
+    let mut multiline = 0;
+    for entry in std::fs::read_dir(&dir).expect("readable") {
+        let path = entry.expect("entry").path();
+        let text = std::fs::read_to_string(&path).expect("readable");
+        if text.matches("\r\n").count() > 1 {
+            multiline += 1;
+        }
+        // And what came out really is a grammar: the CLI can read its own output.
+        //
+        // `check` parses *and* checks, and a generated grammar names rules nothing defines, so
+        // most fail the second half — that is the syntax-only property (D32), not a defect.
+        // What must hold is that it got past parsing, which is what reaching the
+        // structural-error summary means.
+        let checked = run(&["check", path.to_str().expect("utf-8 path")]);
+        assert!(
+            code(&checked) == OK || stderr(&checked).contains("structural"),
+            "generated grammar {} does not parse:\n{}",
+            path.display(),
+            stderr(&checked)
+        );
+    }
+    assert!(
+        multiline > 0,
+        "none of the generated grammars spanned lines"
     );
 }
