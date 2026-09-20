@@ -569,6 +569,22 @@ Random tiny grammars (proptest): ≤ 4 rules, nesting ≤ 3, alphabet `{a, b}` p
 bounds ≤ 3, no prose. Filter to grammars that pass `check()` — which discards the
 left-recursive ones the enumerator would loop on anyway.
 
+**It works, and that was measured rather than assumed.** 72% of generated grammars survive
+`check` (the rest are left-recursive), averaging 2.4 rules, so the properties run on real input
+rather than mostly skipping. More to the point: reintroducing revision 1's bug — phase 1 exiting
+on `next ⊆ cur` instead of `next == cur` — **fails the property test and passes all twelve
+mandatory rows**. The counterexample it shrank to,
+
+```abnf
+r0 = 3*3(("a" r1))
+r1 = 0*1(%x61)
+```
+
+accepts `"aa"` under the bug: the reachable set goes `{0} → {1,2} → {2}`, *shrinking* into a
+subset, so a subset test stops after two of the three required repetitions. No mandatory row has
+a shrinking position set. That case is now a permanent row in `tests/repetition.rs`, which is
+the right end state — the property test finds them, the cheap table keeps them.
+
 ### 4.4 The generatable graph and `dist_to_uncovered` (new in 5.1)
 
 Everything coverage-related runs on this graph, so build it once, explicitly, rather than
@@ -668,7 +684,7 @@ subdirectory.
 | **2.3** | Hygiene test (D33) | `DIGIT = "x"` + a rule referencing `HEXDIG`: `HEXDIG` matches `7`, the user `DIGIT` matches `x` and not `7`, exactly one `ShadowsCoreRule`, no errors |
 | **2.4** | Corpus harness, JSONTestSuite import, `NOTES.md`, `PROVENANCE.md` | all 95 `y_` accepted and all 174 decodable `n_` rejected — no disagreement with the suite at all; 12 `n_` moved to `indeterminate/` for invalid UTF-8 and 2 for depth, each listed in `NOTES.md` |
 | **2.5** | `tests/self_definition.rs` (D23); the two `invalid/parse/` fixtures and an RFC 7405 fixture, both gaps left by M1 | the canonical self-grammar accepts every fixture, including itself and one using `%s`/`%i`; rejects ten negative controls the parser also rejects; and the one documented divergence — a 25-digit repeat, valid ABNF that `u64` refuses — is pinned from both sides |
-| **2.6** | Brute-force enumerator + proptest (§4.3); memo-off equivalence test | property tests green at the default case count |
+| **2.6** | Brute-force enumerator + proptest (§4.3); memo-off equivalence test | property tests green at the default case count, with 72% of generated grammars surviving `check`; **validated by mutation** — reintroducing revision 1's subset bug fails the property test and passes all twelve mandatory rows |
 | **2.7** | Compatibility limits end to end; CLI `match` with §11 exit codes, incl. invalid UTF-8 → exit 2 (D14) | the prose fixture errors from a reaching start rule and returns `Ok` from a non-reaching one |
 
 JSONTestSuite is MIT-licensed: vendor `test_parsing/` only, with its `LICENSE` and a

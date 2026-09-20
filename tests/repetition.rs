@@ -131,6 +131,37 @@ fn work_stays_linear_in_the_input() {
     }
 }
 
+#[test]
+fn a_shrinking_position_set_does_not_end_phase_one() {
+    // Found by the property test in `recognize_property.rs`, which is how it earned its place
+    // here: the twelve mandatory rows all pass with phase 1's equality test weakened to a
+    // subset test, and this does not.
+    //
+    // `r0` needs three repetitions of `"a" r1`, each consuming one or two characters, so it
+    // matches three to six. On "aa" the reachable set goes {0} -> {1,2} -> {2}: it *shrinks*,
+    // and {2} is a subset of {1,2}. A subset test would stop there and accept after two
+    // repetitions. Equality does not, because the two sets are not equal.
+    let source = "r0 = 3*3((\"a\" r1))
+r1 = 0*1(%x61)
+";
+    let grammar = Grammar::parse(source)
+        .expect("parses")
+        .check()
+        .expect("checks");
+
+    for (input, expected) in [
+        ("aa", false),
+        ("aaa", true),
+        ("aaaaaa", true),
+        ("aaaaaaa", false),
+    ] {
+        let matched = Recognizer::new(&grammar, input)
+            .accepts("r0")
+            .expect("recognizes");
+        assert_eq!(matched, expected, "{input:?}");
+    }
+}
+
 // -- the rows that are structural errors rather than matches ---------------------------------
 
 #[test]
