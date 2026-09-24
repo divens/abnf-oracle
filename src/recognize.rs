@@ -357,8 +357,26 @@ impl<'g, 'i> Recognizer<'g, 'i> {
             }
         }
 
-        self.step()?;
-        let ends = self.match_node(grammar.rule_by_id(target).body, pos)?;
+        let outcome = self
+            .step()
+            .and_then(|()| self.match_node(grammar.rule_by_id(target).body, pos));
+
+        let ends = match outcome {
+            Ok(ends) => ends,
+            Err(error) => {
+                // `InProgress` must not outlive the call that wrote it. A resource limit
+                // unwinds past the `Done` insertion below, and a later call on this same
+                // recognizer would then read the leftover marker as left recursion -- which
+                // `check` has already ruled out, making it a wrong answer rather than a
+                // limit. Every frame cleans up as the error passes through, so the table is
+                // whole again by the time the caller sees the error.
+                if self.memoize {
+                    self.memo.remove(&key);
+                }
+                return Err(error);
+            }
+        };
+
         if self.memoize {
             self.memo.insert(key, Memo::Done(ends.clone()));
         }
@@ -772,16 +790,91 @@ mod tests {
     fn the_depth_limit_does_not_leak_between_calls() {
         // The counter is decremented on the way back up, including on the error path, so a
         // recognizer that hit the limit once still works afterwards.
+        //
+        // Asserted on the *same* recognizer, which is the point: an earlier version of this
+        // test built a second one on different input, and so checked nothing about reuse.
         let grammar = checked("start = \"(\" start \")\" / \"x\"\r\n");
-        let deep = format!("{}x{}", "(".repeat(5_000), ")".repeat(5_000));
-        let mut recognizer = Recognizer::new(&grammar, &deep);
+        // Four is enough to decide "x))" and not enough for "((x))": alternation is unordered,
+        // so the deep branch is explored even when the shallow one would succeed.
+        let mut recognizer = Recognizer::new(&grammar, "((x))").with_options(MatchOptions {
+            max_depth: Some(4),
+            ..MatchOptions::default()
+        });
         assert!(matches!(
             recognizer.accepts("start"),
             Err(MatchError::DepthLimit)
         ));
 
-        let mut shallow = Recognizer::new(&grammar, "((x))");
-        assert!(shallow.accepts("start").expect("recognizes"));
+        // Asking the same question again must give the same honest answer. Anything else --
+        // `LeftRecursionDetected` in particular -- would be a verdict invented by leftover
+        // state, on a grammar `check` has already proved is not left-recursive.
+        match recognizer.accepts("start") {
+            Err(MatchError::DepthLimit) => {}
+            other => panic!("a repeated question should get a repeated answer, got {other:?}"),
+        }
+
+        // And the recognizer is still usable for work it *can* do: from position 2 the input
+        // is "x))", which needs almost no depth. This is the key the failed descent left
+        // half-written, so it only decides if the table was repaired on the way out.
+        let ends = recognizer
+            .end_positions("start", 2)
+            .expect("usable after a depth limit");
+        assert!(
+            ends.contains(&3),
+            "expected to match \"x\" at 2, got {ends:?}"
+        );
+    }
+
+    #[test]
+    fn a_step_limit_does_not_poison_the_memo() {
+        // `match_rule_ref` writes `Memo::InProgress` before descending. If a limit unwinds past
+        // the `Done` insertion, that marker outlives the call, and the next one reads it as
+        // left recursion -- a wrong answer rather than a limit.
+        let grammar = checked("start = a a a\r\na = b b\r\nb = \"x\" / \"y\"\r\n");
+        let mut recognizer = Recognizer::new(&grammar, "xxxxxx").with_options(MatchOptions {
+            max_steps: Some(3),
+            ..MatchOptions::default()
+        });
+
+        assert!(matches!(
+            recognizer.accepts("start"),
+            Err(MatchError::StepLimit)
+        ));
+
+        // The step budget is spent and is not reset per call, so refusing again is correct.
+        // Refusing *for the wrong reason* is the bug.
+        match recognizer.accepts("start") {
+            Err(MatchError::StepLimit) => {}
+            other => panic!("expected the spent budget to persist, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_limit_deep_in_the_grammar_still_leaves_the_memo_whole() {
+        // Not only the outermost rule: the limit can trip several frames down, and every frame
+        // has to clean up as the error passes through it. Sweeping the budget walks the failure
+        // point through each level of the chain in turn.
+        let grammar = checked("start = a\r\na = b\r\nb = c\r\nc = d\r\nd = \"x\" / \"y\"\r\n");
+
+        for budget in 1..=8 {
+            let mut recognizer = Recognizer::new(&grammar, "x").with_options(MatchOptions {
+                max_steps: Some(budget),
+                ..MatchOptions::default()
+            });
+            let first = recognizer.accepts("start");
+            let second = recognizer.accepts("start");
+
+            // Whatever the first call decided, the second must agree with it. The two can only
+            // differ if the first left something behind.
+            assert_eq!(
+                first, second,
+                "budget {budget}: the answer changed when the question was repeated"
+            );
+            assert!(
+                !matches!(second, Err(MatchError::LeftRecursionDetected { .. })),
+                "budget {budget}: invented left recursion in a grammar that has none"
+            );
+        }
     }
 
     #[test]
