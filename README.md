@@ -112,6 +112,11 @@ Deliberately out of scope, and not planned:
 
 [`SCOPE.md`](https://github.com/divens/abnf-oracle/blob/main/SCOPE.md) section 3 has the full list with the reasoning.
 
+## Changes
+
+[`CHANGELOG.md`](https://github.com/divens/abnf-oracle/blob/main/CHANGELOG.md) records what
+changed in each release and why.
+
 ## Requirements
 
 Rust 1.88 or later, verified in CI by running the full suite on that toolchain. The library
