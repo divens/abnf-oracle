@@ -1,6 +1,6 @@
 [package]
 name = "abnf-oracle"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.88"
 description = "Parse ABNF grammars (RFC 5234, RFC 7405), recognize whether input matches a rule, and generate matching inputs. Built as a testing oracle."
