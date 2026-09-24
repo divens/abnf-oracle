@@ -110,7 +110,10 @@ impl CheckedGrammar {
 
         while let Some(index) = queue.pop() {
             let body = self.rules()[index].body;
-            for target in self.references_in(body) {
+            // Reachability is semantic, so it stops where the generator and the compatibility
+            // analysis stop: a `max == 0` repetition can never run, and nothing inside it is
+            // reachable however plainly it is written (D36, D47).
+            for target in self.references_in_reachable(body) {
                 if target < self.rules().len() && reachable.insert(target) {
                     queue.push(target);
                 }
@@ -122,14 +125,26 @@ impl CheckedGrammar {
     /// The rules a body references, as indices into the combined table.
     fn references_in(&self, body: NodeId) -> BTreeSet<usize> {
         let mut found = BTreeSet::new();
-        self.walk(body, &mut |grammar, node| {
+        self.walk(body, &mut Self::collect_reference(&mut found));
+        found
+    }
+
+    /// The rules a body can actually reach, ignoring what `max == 0` hides (D36).
+    fn references_in_reachable(&self, body: NodeId) -> BTreeSet<usize> {
+        let mut found = BTreeSet::new();
+        self.walk_reachable(body, &mut Self::collect_reference(&mut found));
+        found
+    }
+
+    /// The visitor both of the above share.
+    fn collect_reference(found: &mut BTreeSet<usize>) -> impl FnMut(&Self, NodeId) + '_ {
+        move |grammar, node| {
             if matches!(grammar.node(node), Node::RuleRef { .. })
                 && let Some(target) = grammar.target(node)
             {
                 found.insert(grammar.rule_index(target));
             }
-        });
-        found
+        }
     }
 
     /// The branch indices of alternations in this body that can never match.
@@ -152,22 +167,48 @@ impl CheckedGrammar {
     }
 
     /// Visits every node of a body, parents before children.
+    ///
+    /// Textual: everything the author wrote, including what can never run. This is what
+    /// `UnreferencedRule` wants, since it asks whether any rule body *mentions* a name.
     fn walk(&self, node: NodeId, visit: &mut impl FnMut(&Self, NodeId)) {
+        self.walk_inner(node, false, visit);
+    }
+
+    /// As [`Self::walk`], but skipping what a `max == 0` repetition makes unreachable.
+    ///
+    /// Semantic: what the recognizer and generator can actually arrive at. `UnreachableRule`
+    /// wants this one, and the difference shows on `start = *0dead` (D47).
+    fn walk_reachable(&self, node: NodeId, visit: &mut impl FnMut(&Self, NodeId)) {
+        self.walk_inner(node, true, visit);
+    }
+
+    fn walk_inner(
+        &self,
+        node: NodeId,
+        skip_unreachable: bool,
+        visit: &mut impl FnMut(&Self, NodeId),
+    ) {
         visit(self, node);
         match self.node(node) {
             Node::Alt { branches } => {
                 for branch in branches.clone() {
-                    self.walk(branch, visit);
+                    self.walk_inner(branch, skip_unreachable, visit);
                 }
             }
             Node::Concat { items } => {
                 for item in items.clone() {
-                    self.walk(item, visit);
+                    self.walk_inner(item, skip_unreachable, visit);
                 }
             }
-            Node::Repeat { body, .. } | Node::Optional { body } => {
+            Node::Repeat { repeat, body, .. } => {
+                let (never, body) = (repeat.is_never(), *body);
+                if !(skip_unreachable && never) {
+                    self.walk_inner(body, skip_unreachable, visit);
+                }
+            }
+            Node::Optional { body } => {
                 let body = *body;
-                self.walk(body, visit);
+                self.walk_inner(body, skip_unreachable, visit);
             }
             Node::RuleRef { .. } | Node::CharVal(_) | Node::NumVal { .. } | Node::ProseVal(_) => {}
         }
@@ -384,5 +425,79 @@ mod tests {
                 "rule `bad` can never match: it has no finite expansion",
             ]
         );
+    }
+
+    // -- reachability through a repetition that can never run (D47) ------------------------
+
+    /// Whether `lint_from` calls `name` unreachable from `start`.
+    fn unreachable(src: &str, name: &str) -> bool {
+        lint_from(src, &["start"])
+            .iter()
+            .any(|warning| matches!(warning, LintWarning::UnreachableRule { name: n } if n == name))
+    }
+
+    /// Whether `lint` calls `name` unreferenced.
+    fn unreferenced(src: &str, name: &str) -> bool {
+        lint(src)
+            .iter()
+            .any(|w| matches!(w, LintWarning::UnreferencedRule { name: n } if n == name))
+    }
+
+    #[test]
+    fn a_rule_behind_a_zero_repetition_is_not_reachable() {
+        // `*0dead` can never run, so nothing inside it is reachable however plainly it is
+        // written. The checker, the compatibility analysis and the generator already agree
+        // (D36); this is the lint catching up.
+        assert!(unreachable("start = *0dead\r\ndead = \"x\"\r\n", "dead"));
+    }
+
+    #[test]
+    fn every_spelling_of_a_zero_repetition_agrees() {
+        for source in [
+            "start = *0dead\r\ndead = \"x\"\r\n",
+            "start = 0*0dead\r\ndead = \"x\"\r\n",
+            "start = *0(dead)\r\ndead = \"x\"\r\n",
+            "start = *0(*0(dead))\r\ndead = \"x\"\r\n",
+        ] {
+            assert!(unreachable(source, "dead"), "{source:?}");
+        }
+    }
+
+    #[test]
+    fn being_unreachable_is_not_the_same_as_being_unmentioned() {
+        // The two warnings answer different questions, and this grammar separates them:
+        // `start` does mention `dead`, so it is referenced; it can never run it, so it is
+        // unreachable. Reporting both or neither would collapse a distinction the warnings'
+        // own definitions draw.
+        let source = "start = *0dead\r\ndead = \"x\"\r\n";
+        assert!(unreachable(source, "dead"), "it cannot be reached");
+        assert!(!unreferenced(source, "dead"), "but it is plainly mentioned");
+    }
+
+    #[test]
+    fn a_rule_reachable_by_any_route_stays_reachable() {
+        // Suppression applies to the path, not the name. A rule mentioned inside a dead
+        // repetition *and* somewhere live is reachable, and a fix that keyed off the name
+        // rather than the route would get these wrong.
+        for source in [
+            "start = *0dead dead\r\ndead = \"x\"\r\n",
+            "start = *0dead other\r\nother = dead\r\ndead = \"x\"\r\n",
+        ] {
+            assert!(!unreachable(source, "dead"), "{source:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_zero_maximum_hides_what_it_contains() {
+        // A repetition that *may* run zero times is not one that can never run. `*1` and `0*1`
+        // both admit one repetition, so their bodies stay reachable.
+        for source in [
+            "start = *1dead\r\ndead = \"x\"\r\n",
+            "start = 0*1dead\r\ndead = \"x\"\r\n",
+            "start = *dead\r\ndead = \"x\"\r\n",
+            "start = [dead]\r\ndead = \"x\"\r\n",
+        ] {
+            assert!(!unreachable(source, "dead"), "{source:?}");
+        }
     }
 }

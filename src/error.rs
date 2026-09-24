@@ -346,11 +346,19 @@ impl std::error::Error for CheckErrors {}
 #[non_exhaustive]
 pub enum LintWarning {
     /// No rule body mentions this rule.
+    ///
+    /// Textual, and deliberately so: a name written inside a repetition that can never run is
+    /// still written. That case is [`LintWarning::UnreachableRule`], which asks the other
+    /// question, and a grammar can trip one without the other (D47).
     UnreferencedRule {
         /// The rule name.
         name: String,
     },
     /// Not reachable from the start rules given to `lint_from`.
+    ///
+    /// Semantic: reachability stops where the recognizer and generator stop, so a `max == 0`
+    /// repetition hides whatever it contains (D36). Contrast
+    /// [`LintWarning::UnreferencedRule`], which only asks whether the name appears.
     UnreachableRule {
         /// The rule name.
         name: String,
