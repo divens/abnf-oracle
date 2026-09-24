@@ -314,15 +314,30 @@ impl<'g, 'i> Recognizer<'g, 'i> {
 
         // Phase 2: from exactly-min, extend by up to `max - min` more. Breadth-first by count,
         // subtracting what is already known, so this terminates even for an unbounded maximum.
+        //
+        // The budget counts *down* from how many repetitions are still allowed rather than up
+        // from `min`. Counting up overflows on `18446744073709551615*["a"]`, which is a legal
+        // bound (D17) and reaches here with `min` at `u64::MAX`: the loop is entered once, the
+        // frontier empties, and the increment wraps — panicking in a debug build, which is the
+        // build this crate mostly runs in. Counting down also makes the shape plain: when the
+        // maximum is unbounded there is no counter, because nothing but an empty frontier can
+        // stop the loop.
+        debug_assert!(
+            repeat.max.is_none_or(|max| max >= repeat.min),
+            "`check` rejects an inverted repeat range (D18), so this cannot underflow"
+        );
+        let mut remaining = repeat.max.map(|max| max - repeat.min);
+
         let mut result = current.clone();
         let mut frontier = current;
-        let mut count = repeat.min;
-        while repeat.max.is_none_or(|max| count < max) && !frontier.is_empty() {
+        while remaining.is_none_or(|left| left > 0) && !frontier.is_empty() {
             self.step()?;
             let reached = self.advance(body, &frontier)?;
             frontier = reached.difference(&result).copied().collect();
             result.extend(&frontier);
-            count += 1;
+            if let Some(left) = remaining.as_mut() {
+                *left -= 1;
+            }
         }
         Ok(result)
     }

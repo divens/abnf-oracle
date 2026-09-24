@@ -115,6 +115,72 @@ fn an_enormous_minimum_over_a_consuming_body_is_prompt() {
     );
 }
 
+/// The largest bound ABNF can express here: `repeat` is `1*DIGIT` with no ceiling, and this
+/// crate stores bounds as `u64` (D17), so this is legal input at the very edge of the domain.
+const MAX: &str = "18446744073709551615";
+
+#[test]
+fn the_largest_possible_minimum_does_not_overflow() {
+    // Phase 2 used to count *up* from `min`, so this wrapped: the loop is entered once, the
+    // frontier empties, and the increment runs anyway. That panicked in a debug build — the
+    // build a testing oracle mostly runs in — and silently wrapped in release. Counting down
+    // from the remaining allowance removes the counter entirely when the maximum is unbounded.
+    assert!(accepts(&format!("{MAX}*[\"a\"]"), ""));
+    assert!(accepts(&format!("{MAX}*[\"a\"]"), "aaa"));
+
+    let taken = steps(&format!("{MAX}*[\"a\"]"), "");
+    assert!(taken <= 4, "took {taken} steps for an empty input");
+}
+
+#[test]
+fn the_largest_possible_bounds_in_every_combination() {
+    // The overflow needed `min == u64::MAX` *and* an unbounded maximum. The neighbours are
+    // here so that a future change cannot fix one shape and break another.
+    assert!(
+        accepts(&format!("{MAX}*[\"a\"]"), ""),
+        "unbounded, nullable"
+    );
+    assert!(
+        accepts(&format!("{MAX}*{MAX}[\"a\"]"), ""),
+        "bounded at the same value, nullable"
+    );
+    assert!(
+        !accepts(&format!("{MAX}*\"a\""), "aaa"),
+        "unbounded, consuming: three is not u64::MAX"
+    );
+    assert!(
+        !accepts(&format!("{MAX}*{MAX}\"a\""), "aaa"),
+        "bounded, consuming"
+    );
+    assert!(
+        accepts(&format!("0*{MAX}[\"a\"]"), "aa"),
+        "an enormous maximum over a nullable body"
+    );
+    assert!(
+        accepts(&format!("0*{MAX}\"a\""), "aa"),
+        "an enormous maximum over a consuming body"
+    );
+}
+
+#[test]
+fn one_below_the_largest_minimum_behaves_the_same() {
+    // Guards against a fix that special-cases `u64::MAX` instead of removing the arithmetic.
+    let nearly = "18446744073709551614";
+    assert!(accepts(&format!("{nearly}*[\"a\"]"), ""));
+    assert!(!accepts(&format!("{nearly}*\"a\""), "aaa"));
+}
+
+#[test]
+fn an_enormous_maximum_still_stops_at_the_input() {
+    // The maximum is the thing being counted down, so it is worth checking that a huge one
+    // does not simply run: the frontier empties once the input is consumed.
+    let taken = steps(&format!("0*{MAX}\"a\""), "aaaa");
+    assert!(
+        taken <= 4 * (4 + 1),
+        "took {taken} steps for four characters"
+    );
+}
+
 #[test]
 fn work_stays_linear_in_the_input() {
     // The O(input) property stated directly, rather than as a timeout: every repetition
