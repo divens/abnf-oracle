@@ -347,3 +347,68 @@ fn coverage_mode_is_deterministic() {
         .collect();
     assert_eq!(first, second);
 }
+
+#[test]
+fn core_rules_report_their_own_coverage() {
+    // The reachability cache used to be keyed by an index into the user-rule slice. Implicit
+    // core rules have no such index, so they all collapsed onto one entry and the second one
+    // asked returned the first one's answer. Keyed by body `NodeId` they are distinct (D46).
+    let grammar = checked("start = ALPHA HEXDIG\r\n");
+
+    // ALPHA is `%x41-5A / %x61-7A`: two branches. HEXDIG is DIGIT plus six letters: seven.
+    let mut forwards = covering(&grammar, 0);
+    assert_eq!(forwards.uncovered("ALPHA").expect("countable"), 2);
+    assert_eq!(forwards.uncovered("HEXDIG").expect("countable"), 7);
+
+    // The same two answers when asked the other way round, which is the whole point.
+    let mut backwards = covering(&grammar, 0);
+    assert_eq!(backwards.uncovered("HEXDIG").expect("countable"), 7);
+    assert_eq!(backwards.uncovered("ALPHA").expect("countable"), 2);
+}
+
+#[test]
+fn user_and_core_rules_share_one_generator_without_interfering() {
+    let grammar = checked("start = ALPHA HEXDIG\r\nother = \"p\" / \"q\" / \"r\"\r\n");
+    let mut generator = covering(&grammar, 0);
+
+    // Asked repeatedly and interleaved: every answer must be the rule's own, every time.
+    let expected = [
+        ("ALPHA", 2),
+        ("other", 3),
+        ("HEXDIG", 7),
+        ("ALPHA", 2),
+        ("other", 3),
+    ];
+    for (name, count) in expected {
+        assert_eq!(
+            generator.uncovered(name).expect("countable"),
+            count,
+            "{name} reported the wrong count"
+        );
+    }
+}
+
+#[test]
+fn a_rule_with_no_alternation_has_nothing_to_cover() {
+    // `DIGIT = %x30-39` is a single range: one way to write it, so no choice to exercise.
+    // Worth pinning because zero is also what a *broken* cache lookup would plausibly return.
+    let grammar = checked("start = DIGIT\r\n");
+    let mut generator = covering(&grammar, 0);
+    assert_eq!(generator.uncovered("DIGIT").expect("countable"), 0);
+
+    // And `start`, which only references it, inherits that: still nothing to cover.
+    assert_eq!(generator.uncovered("start").expect("countable"), 0);
+}
+
+#[test]
+fn the_bound_holds_when_generating_from_a_core_rule() {
+    // Coverage mode was never broken by the cache — the chase reads distances, not this cache —
+    // but the guarantee is worth asserting on core rules too, since `uncovered` is how a caller
+    // would check it and that is what was wrong.
+    let grammar = checked("start = HEXDIG\r\n");
+    let produced = drive_to_coverage(&grammar, "HEXDIG", 0);
+    assert!(
+        !produced.is_empty(),
+        "driving a core rule to full coverage should generate something"
+    );
+}

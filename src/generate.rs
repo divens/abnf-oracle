@@ -165,14 +165,7 @@ impl<'g> Generator<'g> {
     /// has no coverage to report.
     pub fn uncovered(&mut self, rule: &str) -> Result<usize, GenError> {
         let body = self.start_rule(rule)?;
-        let index = self
-            .grammar
-            .rules()
-            .iter()
-            .position(|candidate| candidate.body == body)
-            .unwrap_or(usize::MAX);
-
-        Ok(self.coverage.uncovered_reachable(self.grammar, index, body))
+        Ok(self.coverage.uncovered_reachable(self.grammar, body))
     }
 
     /// Generates one string that `rule` accepts.
@@ -507,8 +500,13 @@ struct Coverage {
     index: HashMap<Unit, usize>,
     /// Which units have been covered by a successful call.
     covered: Vec<bool>,
-    /// Which units are reachable from each start rule, cached on first use.
-    reachable: HashMap<usize, Vec<usize>>,
+    /// Which units are reachable from each rule body, cached on first use.
+    ///
+    /// Keyed by the body's [`NodeId`], which is unique per rule across *both* tables. Keying by
+    /// an index into the user-rule slice instead meant every implicit core rule -- which has no
+    /// such index -- collapsed onto one shared entry, so asking about `HEXDIG` after `ALPHA`
+    /// returned `ALPHA`'s answer (D46).
+    reachable: HashMap<NodeId, Vec<usize>>,
     /// Successors of each node over the generatable graph.
     edges: Vec<Vec<NodeId>>,
     /// Distance from each node to the nearest uncovered unit.
@@ -583,26 +581,21 @@ impl Coverage {
     }
 
     /// How many units reachable from `body` are still uncovered.
-    fn uncovered_reachable(
-        &mut self,
-        grammar: &CheckedGrammar,
-        rule: usize,
-        body: NodeId,
-    ) -> usize {
+    fn uncovered_reachable(&mut self, grammar: &CheckedGrammar, body: NodeId) -> usize {
         // Populate the cache first, so the borrow of `reachable` ends before `covered` is read.
-        self.reachable_from(grammar, rule, body);
-        self.reachable[&rule]
+        self.reachable_from(grammar, body);
+        self.reachable[&body]
             .iter()
             .filter(|position| !self.covered[**position])
             .count()
     }
 
-    /// The units reachable from `rule`'s body, cached.
+    /// The units reachable from a rule `body`, cached.
     ///
     /// Reachability does not change as coverage grows — the generatable graph is fixed — so
-    /// this is computed once per start rule.
-    fn reachable_from(&mut self, grammar: &CheckedGrammar, rule: usize, body: NodeId) -> &[usize] {
-        if !self.reachable.contains_key(&rule) {
+    /// this is computed once per body.
+    fn reachable_from(&mut self, grammar: &CheckedGrammar, body: NodeId) -> &[usize] {
+        if !self.reachable.contains_key(&body) {
             let mut seen = vec![false; grammar.node_count()];
             let mut stack = vec![body];
             seen[body.index()] = true;
@@ -624,9 +617,9 @@ impl Coverage {
                 }
             }
             found.sort_unstable();
-            self.reachable.insert(rule, found);
+            self.reachable.insert(body, found);
         }
-        &self.reachable[&rule]
+        &self.reachable[&body]
     }
 
     /// Marks a unit covered, if it is one.
