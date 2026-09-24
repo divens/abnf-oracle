@@ -155,6 +155,11 @@ impl<'g, 'i> Recognizer<'g, 'i> {
     /// How many steps have been taken: one per repetition iteration and one per rule body
     /// evaluated.
     ///
+    /// Counted over the whole life of this recognizer and never reset, so
+    /// [`MatchOptions::max_steps`] is a budget for everything asked of it rather than for one
+    /// call. A recognizer is bound to one input, and its memo table is shared across calls, so
+    /// the work really is cumulative. [`crate::Generator::steps`] is the other way round.
+    ///
     /// This is the counter [`MatchOptions::max_steps`] limits. Performance tests assert against
     /// it rather than against wall-clock time (D31).
     #[must_use]

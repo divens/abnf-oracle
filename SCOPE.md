@@ -1,10 +1,10 @@
-# Scoping document: `abnf-oracle` (revision 5.13)
+# Scoping document: `abnf-oracle` (revision 5.14)
 
 A small, correct, dependency-light Rust crate that parses ABNF grammars (RFC 5234, RFC 7405), recognizes whether an input matches a rule, and generates random inputs that match a rule. Built to be a **testing oracle**, not a production parser.
 
 Working crate name: `abnf-oracle` (rename freely; `abnf` on crates.io is taken by an unmaintained crate with a different scope).
 
-Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar; 5.4 completes §6.7's parenthesization rule, which covered two of the four cases that need parentheses; 5.5 corrects the claim that RFC 3986 and RFC 9110 restate the core rules, which neither does; 5.6 replaces the witness tie-case grammar, which was itself left-recursive and so could never be checked, and states the witness rule in terms of derivation length; 5.7 removes the whitespace from the §6.3 repetition table, where six of the twelve rows were spelled in a way ABNF does not admit; 5.8 adds `MatchOptions::max_depth`, after M2.4 found that deeply nested input overflowed the stack and aborted the process; 5.9 wraps `check`'s errors in a `CheckErrors` newtype, because `Vec` is a foreign type and so can never implement `std::error::Error`, which forced every caller to handle this one error specially instead of using `?`; 5.10 makes memoization transactional after an external review of v0.1.0 found that a resource limit left `InProgress` behind and turned a later call on the same recognizer into a fabricated left-recursion report; 5.11 removes the repetition counter that overflowed on the largest legal bound, 5.12 keys the coverage cache by node id so implicit core rules stop sharing one entry, and 5.13 makes lint reachability respect `max == 0` — all from the same review. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
+Revisions 2–5 incorporate three rounds of external review and one round of implementation-planning questions; 5.1 resolves a conflict between the depth budget and the coverage guarantee raised during implementation; 5.2 corrects three M3 acceptance criteria that could not be run as written; 5.3 corrects the description of Errata 2968 and 3076, whose subjects were transposed, and adds 3076 to the canonical self-grammar; 5.4 completes §6.7's parenthesization rule, which covered two of the four cases that need parentheses; 5.5 corrects the claim that RFC 3986 and RFC 9110 restate the core rules, which neither does; 5.6 replaces the witness tie-case grammar, which was itself left-recursive and so could never be checked, and states the witness rule in terms of derivation length; 5.7 removes the whitespace from the §6.3 repetition table, where six of the twelve rows were spelled in a way ABNF does not admit; 5.8 adds `MatchOptions::max_depth`, after M2.4 found that deeply nested input overflowed the stack and aborted the process; 5.9 wraps `check`'s errors in a `CheckErrors` newtype, because `Vec` is a foreign type and so can never implement `std::error::Error`, which forced every caller to handle this one error specially instead of using `?`; 5.10 makes memoization transactional after an external review of v0.1.0 found that a resource limit left `InProgress` behind and turned a later call on the same recognizer into a fabricated left-recursion report; 5.11 removes the repetition counter that overflowed on the largest legal bound, 5.12 keys the coverage cache by node id so implicit core rules stop sharing one entry, and 5.13 makes lint reachability respect `max == 0` — all from the same review. 5.14 is documentation only: M4, the repository layout and the §7 and §11 sketches had fallen behind what was actually built and shipped. Every normative decision those reviews forced is collected in §13, "Decisions before M1"; the rest of the document is written to agree with it.
 
 ---
 
@@ -22,7 +22,7 @@ This crate fills that gap. It is deliberately scoped as an oracle: correctness o
 2. Decide, for a checked grammar, a start rule and an input string, whether the input is in the language. The decision must be faithful to ABNF semantics over Unicode scalar values: **unordered alternation** (not PEG ordered choice), full backtracking, ambiguity tolerated.
 3. Generate strings that match a rule, deterministically from a seed, with a coverage mode that guarantees progress toward exercising every *generatable* branch (§6.8).
 4. Validate grammars in three distinct categories (§6.6): structural errors, recognizer-compatibility limits, and lint warnings.
-5. Be trustworthy enough to serve as one side of a differential test against `go-abnf`, Python `abnf`, and `abnfgen`.
+5. Be trustworthy enough to serve as one side of a differential test against `go-abnf`, Python `abnf`, and `abnfgen`. (As shipped: python-abnf and go-abnf; see M4.)
 6. Be small: a few thousand lines, no proc macros, no unsafe, no required dependencies for the library target.
 
 ## 3. Non-goals
@@ -118,11 +118,18 @@ abnf-oracle/
 │   ├── corpus/<grammar>/      accept/ and reject/ directories, one input per file
 │   ├── parse_grammars.rs      every .abnf in tests/grammars parses and checks
 │   ├── recognize_corpus.rs    every accept/ file matches, every reject/ file does not
+│   ├── recognize_property.rs  the recognizer against an enumerated-language oracle (§4.3)
 │   ├── repetition.rs          nullable-repetition regression cases (§6.3)
-│   ├── generate_roundtrip.rs  generated strings are accepted; coverage bound holds
-│   └── self_definition.rs     the RFC 5234+7405 self-grammar recognizes every fixture's text
+│   ├── generate_roundtrip.rs  generated strings are accepted
+│   ├── generate_coverage.rs   the coverage bound holds (§6.8)
+│   ├── self_definition.rs     the RFC 5234+7405 self-grammar recognizes every fixture's text
+│   ├── self_generation.rs     grammars it generates, the parser accepts (D35, the other half)
+│   └── cli.rs                 the exit codes of §11, through the built binary
 └── scripts/
-    └── differential.sh        compare verdicts against go-abnf / python abnf / abnfgen
+    ├── extract-fixtures.py    rebuild tests/grammars from published RFC text
+    ├── differential.py        compare verdicts against other implementations
+    ├── goharness/             go-abnf behind this crate's command shape, for the above
+    └── DIFFERENTIAL.md        what the last run found
 ```
 
 Module dependency order: `ast` ← `parse`, `core_rules` ← `check` ← `lint`, `recognize`, `generate`. Nothing depends on the CLI.
@@ -367,7 +374,7 @@ impl<'g, 'i> Recognizer<'g, 'i> {
     pub fn with_options(self, opts: MatchOptions) -> Self;
     pub fn accepts(&mut self, rule: &str) -> Result<bool, MatchError>;
     pub fn end_positions(&mut self, rule: &str, start: usize) -> Result<BTreeSet<usize>, MatchError>;
-    pub fn steps(&self) -> u64;                       // repetition/rule step evaluations so far; the counter max_steps limits
+    pub fn steps(&self) -> u64;                       // repetition/rule evaluations over this recognizer's whole life; never reset
 }
 
 pub struct GenOptions { pub max_depth: usize, pub spread: usize, pub coverage: bool, pub preserve_case: bool,
@@ -379,8 +386,8 @@ impl<'g> Generator<'g> {
     pub fn new(grammar: &'g CheckedGrammar, seed: u64) -> Self;
     pub fn with_options(self, opts: GenOptions) -> Self;
     pub fn generate(&mut self, rule: &str) -> Result<String, GenError>;
-    pub fn uncovered(&self, rule: &str) -> usize;     // coverage units reachable over the generatable graph, not yet covered
-    pub fn steps(&self) -> u64;                       // node visits so far; the counter max_steps limits (mirrors Recognizer::steps)
+    pub fn uncovered(&mut self, rule: &str) -> Result<usize, GenError>;  // units reachable over the generatable graph, not yet covered; caches, hence &mut
+    pub fn steps(&self) -> u64;                       // node visits in the current call; reset by each generate(), unlike Recognizer::steps
 }
 
 pub enum MatchError { ProseValueReachable {..}, UnrepresentableTerminal {..}, UnknownRule(String), LeftRecursionDetected {..}, StepLimit, DepthLimit }
@@ -428,8 +435,10 @@ Each milestone is a PR-sized unit. Do not start the next before the current one'
 - Determinism: two fresh generators with the same seed and options produce identical sequences over 100 calls.
 
 **M4 — Differential testing (non-blocking during implementation; required before the 1.0 release).**
-- `scripts/differential.sh` runs `abnfgen -c` on each fixture, feeds outputs to `abnf-oracle match`, asserts acceptance.
-- Where available, compares verdicts against `go-abnf` or Python `abnf`. Any disagreement is a bug in one of the three and must be understood before being waived; expected disagreements on octet-range terminals (§3) are documented in advance.
+- `scripts/differential.py` drives every implementation that is installed, in three directions per fixture: strings this crate generates that the other must accept, strings the other generates that this crate must accept, and a shared corpus both must decide the same way. `scripts/goharness/` exposes go-abnf through this crate's own command shape and exit codes so the driver treats both alike.
+- Any disagreement is a bug in one of the implementations — or in the harness, which is a suspect too — and must be understood before being waived. Attributed ones live in `ATTRIBUTED` in the driver, so a known divergence stays green while a new one fails the run; nothing goes there until it has been reduced to a minimal case and checked against a third implementation.
+- **As shipped:** python-abnf 2.9.0 and go-abnf v0.5.1. `abnfgen` was not run — it is a C program with no Windows package — and go-abnf's generator covers the direction it would have. The run found a real bug in go-abnf, and `scripts/DIFFERENTIAL.md` records the results, the divergences and the reasoning.
+- The octet-range disagreements this section expected to document in advance **did not appear**: RFC 9110's `obs-text = %x80-FF` round-trips through both implementations, so all three read those terminals as code points rather than bytes. The §3 limitation is real; it would take a genuinely byte-oriented implementation to expose it.
 
 ## 9. Testing conventions
 
@@ -450,8 +459,9 @@ Each milestone is a PR-sized unit. Do not start the next before the current one'
 
 ```
 abnf-oracle check  <grammar.abnf> [--start R ...]              # parse + check + lint; --start enables unreachable warnings
-abnf-oracle match  <grammar.abnf> --rule R (--input S | --file F | --dir D) [--max-steps N]
-abnf-oracle gen    <grammar.abnf> --rule R [--seed N] [--count N] [--coverage] [--depth N] [--spread N] [--max-output-len N] [--max-steps N]
+abnf-oracle match  <grammar.abnf> --rule R (--input S | --file F | --dir D) [--max-steps N] [--max-depth N]
+abnf-oracle gen    <grammar.abnf> --rule R [--seed N] [--count N] [--coverage] [--depth N] [--spread N]
+                                   [--preserve-case] [--max-output-len N] [--max-steps N] [--out DIR]
 abnf-oracle rules  <grammar.abnf>                              # list rules with nullable / min_len / flags
 ```
 

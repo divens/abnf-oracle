@@ -141,7 +141,12 @@ impl<'g> Generator<'g> {
         self
     }
 
-    /// How many nodes have been visited, across every call.
+    /// How many nodes have been visited during the most recent call.
+    ///
+    /// Reset by every [`Generator::generate`], so one call's budget is never spent by the last.
+    /// That differs from [`crate::Recognizer::steps`], which counts over the whole life of a
+    /// recognizer: a generator is asked for many independent strings, while a recognizer is
+    /// bound to one input and answers questions about it.
     ///
     /// The counter [`GenOptions::max_steps`] limits, and what tests assert against rather than
     /// wall-clock time (D31).

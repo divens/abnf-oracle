@@ -64,8 +64,16 @@ least one.
 
 **It reads its own specification.** RFC 5234 defines ABNF in ABNF, so the crate is pointed at
 itself in both directions: the canonical self-grammar recognizes every fixture, and grammars
-*generated* from it must parse. That closes the invariant "this parser accepts exactly the
-language of the RFC's own grammar" from both sides.
+*generated* from it must parse. That closes the invariant "this parser accepts the language of
+the RFC's own grammar" from both sides — with two documented exceptions, both tested rather
+than asserted:
+
+- **Line endings.** The RFC's grammar requires CRLF; this parser also accepts LF, because
+  refusing a grammar file over its checkout settings helps nobody.
+- **Numeric magnitude.** `repeat` is `1*DIGIT` with no ceiling, so `1*99999999999999999999"a"`
+  is valid ABNF that this crate refuses, storing bounds as `u64`.
+
+Everything else the RFC's grammar admits, this parser admits.
 
 **It is checked against other implementations.** [`scripts/differential.py`](https://github.com/divens/abnf-oracle/blob/main/scripts/differential.py) compares verdicts
 against [python-abnf](https://pypi.org/project/abnf/) and

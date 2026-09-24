@@ -1,16 +1,23 @@
-# Implementation plan: `abnf-oracle`
+# Implementation record: `abnf-oracle`
 
-Companion to `SCOPE.md` (revision 5.2). SCOPE.md is normative on *what* is built and why;
-this document is *how*, *in what order*, and *what still needs attention*.
+> **Historical.** This began as the build plan and is kept as the record of how the crate was
+> built and why it is shaped the way it is: the algorithms in §4, the risks in §6 and what
+> actually happened to each of them, and the PR-by-PR acceptance evidence in §5. It is *not*
+> normative and is not maintained against the code — `SCOPE.md` is the specification, and the
+> rustdoc is the API. Where this document and either of those disagree, they are right.
+>
+> Milestones M0–M4 are complete and v0.1.0 is published. Statements below written in the future
+> tense ("lands in M3.2", "still needs attention") describe the state at the time they were
+> written, not outstanding work.
 
-Status at time of writing: empty repository, no commits, `SCOPE.md` only.
-Toolchain present: rustc/cargo 1.97.1 (edition 2024 available). MSRV is **1.88**, measured in
-M4.3 rather than assumed: the crate was developed on 1.97 and declared that, but the oldest
-feature it actually uses is let-chains under edition 2024, and the whole suite passes on 1.88.
+Companion to `SCOPE.md`, which is normative on *what* is built and why; this document was *how*
+and *in what order*. The two were kept in step throughout: §2 records what each SCOPE revision
+changed for the code, and §6 records what the build found that the spec had not anticipated —
+a quadratic limit check, a chase that overflowed the stack, an MSRV nine releases too high.
 
-Revision 5 settled D32–D37; 5.1 settled D38; 5.2 corrected the three M3 acceptance criteria this
-plan flagged. Spec and plan now agree on every normative point: §2 records what 5.1 and 5.2
-changed for the code, and §2.1 is a single follow-up on one of the rewritten criteria.
+Toolchain at the time: rustc/cargo 1.97.1 (edition 2024). MSRV is **1.88**, measured in M4.3
+rather than assumed: the crate was developed on 1.97 and declared that, but the oldest feature
+it actually uses is let-chains under edition 2024, and the whole suite passes on 1.88.
 
 ---
 
